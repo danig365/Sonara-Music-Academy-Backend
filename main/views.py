@@ -339,10 +339,16 @@ class AdminDetail(generics.RetrieveUpdateDestroyAPIView):
 
 @csrf_exempt
 def admin_login(request):
+    import hashlib
+    
     email = request.POST.get('email')
     password = request.POST.get('password')
+    
+    # Hash the password to compare with stored hash
+    hashed_password = hashlib.sha256(password.encode()).hexdigest()
+    
     try:
-        adminData = models.Admin.objects.get(email=email, password=password)
+        adminData = models.Admin.objects.get(email=email, password=hashed_password)
         # Update last login
         adminData.last_login = datetime.now()
         adminData.save()
