@@ -1,0 +1,84 @@
+/* Custom Admin Styling - Fix button widths */
+
+/* Fix the submit row buttons to use auto width instead of full width */
+.submit-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.submit-row input,
+.submit-row a.button {
+    width: auto;
+    padding: 8px 16px;
+    min-width: 120px;
+    flex-shrink: 0;
+}
+
+/* Specifically target the add/change form buttons */
+form .submit-row input[type="submit"],
+form .submit-row a.button,
+form .submit-row .deletelink {
+    width: auto;
+    display: inline-block;
+}
+
+/* Back to courses button */
+.back-to-courses,
+p a.button {
+    width: auto;
+    display: inline-block;
+    padding: 8px 16px;
+}
+
+/* Module header buttons */
+.module-header-buttons,
+.button-group {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.module-header-buttons a,
+.module-header-buttons input,
+.button-group a,
+.button-group input {
+    width: auto;
+    flex-shrink: 0;
+}
+
+/* Ensure fieldsets don't make buttons stretch */
+.module .submit-row {
+    display: flex;
+    gap: 10px;
+    width: auto;
+}
+
+/* Fix any action buttons in change forms */
+.add-row a,
+.delete-row a {
+    width: auto;
+}
+
+/* General button styling - prevent full width */
+a.button,
+input[type="submit"],
+input[type="button"],
+.button {
+    width: auto !important;
+    padding: 8px 16px !important;
+    min-width: fit-content !important;
+}
+
+/* Container fixes for better layout */
+.submit-row {
+    justify-content: flex-start;
+}
+
+/* Ensure buttons stay on one line when possible */
+@media (min-width: 600px) {
+    .submit-row {
+        flex-wrap: nowrap;
+    }
+}
