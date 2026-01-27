@@ -456,6 +456,8 @@ class SchoolCourse(models.Model):
         unique_together = ['school', 'course']
 
 
+
+
 class Subscription(models.Model):
     PLAN_CHOICES = [
         ('free', 'Free'),

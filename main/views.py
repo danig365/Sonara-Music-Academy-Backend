@@ -2869,3 +2869,4 @@ class StudentLessonPageData(APIView):
             return Response({'error': 'Course not found'}, status=404)
         except Exception as e:
             return Response({'error': str(e)}, status=400)
+
