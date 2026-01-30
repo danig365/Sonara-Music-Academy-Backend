@@ -20,3 +20,9 @@ admin.site.register(models.StudentFavoriteCourse)
 admin.site.register(models.StudyMaterial)
 
 admin.site.register(models.Faq)
+
+admin.site.register(models.SubscriptionPlan)
+
+admin.site.register(models.Subscription)
+
+admin.site.register(models.SubscriptionHistory)
