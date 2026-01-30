@@ -3,11 +3,17 @@ import os
 from dotenv import load_dotenv
 import dj_database_url
 
-# Load environment variables from .env file
-load_dotenv()
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load environment variables from .env file
+env_file_path = os.path.join(BASE_DIR, '.env')
+print(f"🔍 Loading .env from: {env_file_path}")
+print(f"   File exists: {os.path.exists(env_file_path)}")
+load_dotenv(env_file_path)
+print(f"✅ Environment variables loaded")
+print(f"   STRIPE_SECRET_KEY is set: {'STRIPE_SECRET_KEY' in os.environ}")
+print(f"   DEBUG: {os.getenv('DEBUG')}")
 
 
 # Quick-start development settings - unsuitable for production

@@ -103,10 +103,6 @@ urlpatterns =[
         path('schools/<int:school_id>/courses/', views.SchoolCourseList.as_view()),
         path('school-courses/<int:pk>/', views.SchoolCourseDetail.as_view()),
         
-        # Subscription Management
-        path('subscriptions/', views.SubscriptionList.as_view()),
-        path('subscriptions/<int:pk>/', views.SubscriptionDetail.as_view()),
-        
         # Activity Logs
         path('activity-logs/', views.ActivityLogList.as_view()),
         
@@ -219,5 +215,24 @@ urlpatterns =[
         
         # Teacher Progress Dashboard
         path('teacher/progress/<int:teacher_id>/', views.TeacherProgressDashboard.as_view()),
+
+        # ==================== SUBSCRIPTION MANAGEMENT URLS ====================
+        
+        # Subscription Plans
+        path('subscription-plans/', views.SubscriptionPlanList.as_view()),
+        path('subscription-plan/<int:pk>/', views.SubscriptionPlanDetail.as_view()),
+        
+        # Subscriptions
+        path('subscriptions/', views.SubscriptionList.as_view()),
+        path('subscription/create-payment-intent/', views.create_payment_intent),
+        path('subscription/<int:subscription_id>/activate/', views.activate_subscription),
+        path('subscription/<int:subscription_id>/cancel/', views.cancel_subscription),
+        path('subscription/<int:pk>/', views.SubscriptionDetail.as_view()),
+        
+        # Subscription History
+        path('subscription-history/', views.SubscriptionHistoryList.as_view()),
+        
+        # Admin Stats
+        path('admin/subscription-stats/', views.get_admin_subscription_stats),
 
 ]

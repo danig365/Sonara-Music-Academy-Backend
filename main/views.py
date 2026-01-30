@@ -5,7 +5,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import generics
 from django.contrib.flatpages.models import FlatPage
-from . serializers import TeacherSerializer,FlatPageSerializer,FaqSerializer,StudyMaterialSerializer,StudentDashboardSerializer,StudentFavoriteCourseSerializer,CategorySerializer,CourseSerializer,ChapterSerializer,StudentSerializer,StudentCourseEnrollSerializer,CourseRatingSerializer,TeacherDashboardSerializer,LessonDownloadableSerializer,ModuleLessonSerializer
+from . serializers import TeacherSerializer,FlatPageSerializer,FaqSerializer,StudyMaterialSerializer,StudentDashboardSerializer,StudentFavoriteCourseSerializer,CategorySerializer,CourseSerializer,ChapterSerializer,StudentSerializer,StudentCourseEnrollSerializer,CourseRatingSerializer,TeacherDashboardSerializer,LessonDownloadableSerializer,ModuleLessonSerializer,SubscriptionPlanSerializer,SubscriptionSerializer,SubscriptionHistorySerializer
 from rest_framework import permissions
 from django.db.models import Q, Avg, Sum
 from . import models
@@ -304,7 +304,7 @@ class MyTeacherList(generics.ListAPIView):
 from . serializers import (
     AdminSerializer, AdminDashboardSerializer, SchoolSerializer,
     SchoolTeacherSerializer, SchoolStudentSerializer, SchoolCourseSerializer,
-    SubscriptionSerializer, ActivityLogSerializer, SystemSettingsSerializer,
+    ActivityLogSerializer, SystemSettingsSerializer,
     AdminStatsSerializer
 )
 from django.db.models import Count, Avg, Sum
@@ -399,7 +399,6 @@ def admin_stats(request):
     total_students = models.Student.objects.count()
     total_courses = models.Course.objects.count()
     total_enrollments = models.StudentCourseEnrollment.objects.count()
-    active_subscriptions = models.Subscription.objects.filter(status='active').count()
     
     # Recent enrollments (last 7 days)
     seven_days_ago = datetime.now() - timedelta(days=7)
@@ -464,14 +463,12 @@ def admin_stats(request):
         'total_students': total_students,
         'total_courses': total_courses,
         'total_enrollments': total_enrollments,
-        'active_subscriptions': active_subscriptions,
         'recent_enrollments': recent_enrollment_data,
         'popular_courses': popular_course_data,
         'monthly_stats': monthly_stats,
         'category_stats': list(category_stats),
         'top_teachers': top_teacher_data
     })
-
 
 # School Views
 class SchoolList(generics.ListCreateAPIView):
@@ -547,25 +544,6 @@ class SchoolCourseList(generics.ListCreateAPIView):
 class SchoolCourseDetail(generics.RetrieveUpdateDestroyAPIView):
     queryset = models.SchoolCourse.objects.all()
     serializer_class = SchoolCourseSerializer
-
-
-# Subscription Views
-class SubscriptionList(generics.ListCreateAPIView):
-    queryset = models.Subscription.objects.all()
-    serializer_class = SubscriptionSerializer
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        if 'school_id' in self.request.GET:
-            qs = qs.filter(school_id=self.request.GET['school_id'])
-        if 'status' in self.request.GET:
-            qs = qs.filter(status=self.request.GET['status'])
-        return qs
-
-
-class SubscriptionDetail(generics.RetrieveUpdateDestroyAPIView):
-    queryset = models.Subscription.objects.all()
-    serializer_class = SubscriptionSerializer
 
 
 # Activity Log Views
@@ -2869,4 +2847,380 @@ class StudentLessonPageData(APIView):
             return Response({'error': 'Course not found'}, status=404)
         except Exception as e:
             return Response({'error': str(e)}, status=400)
+
+
+# ==================== SUBSCRIPTION MANAGEMENT VIEWS ====================
+
+class SubscriptionPlanList(generics.ListCreateAPIView):
+    """List and create subscription plans"""
+    serializer_class = SubscriptionPlanSerializer
+    pagination_class = StandardResultSetPagination
+    
+    def get_queryset(self):
+        queryset = models.SubscriptionPlan.objects.all()
+        status = self.request.query_params.get('status', None)
+        if status:
+            queryset = queryset.filter(status=status)
+        return queryset.order_by('-created_at')
+
+
+class SubscriptionPlanDetail(generics.RetrieveUpdateDestroyAPIView):
+    """Get, update, or delete a subscription plan"""
+    queryset = models.SubscriptionPlan.objects.all()
+    serializer_class = SubscriptionPlanSerializer
+
+
+class SubscriptionList(generics.ListCreateAPIView):
+    """List and create subscriptions (admin can create subscriptions for students)"""
+    queryset = models.Subscription.objects.all()
+    serializer_class = SubscriptionSerializer
+    pagination_class = StandardResultSetPagination
+    
+    def get_queryset(self):
+        queryset = models.Subscription.objects.all()
+        
+        # Filter by student if specified
+        student_id = self.request.query_params.get('student_id', None)
+        if student_id:
+            queryset = queryset.filter(student_id=student_id)
+        
+        # Filter by status
+        status = self.request.query_params.get('status', None)
+        if status:
+            queryset = queryset.filter(status=status)
+        
+        # Filter by plan
+        plan_id = self.request.query_params.get('plan_id', None)
+        if plan_id:
+            queryset = queryset.filter(plan_id=plan_id)
+        
+        return queryset.order_by('-created_at')
+    
+    def perform_create(self, serializer):
+        """Save subscription and create history entry"""
+        subscription = serializer.save()
+        
+        # Create history entry
+        models.SubscriptionHistory.objects.create(
+            subscription=subscription,
+            action='created',
+            new_status=subscription.status,
+            new_plan=subscription.plan,
+            changed_by='admin'
+        )
+
+
+class SubscriptionDetail(generics.RetrieveUpdateDestroyAPIView):
+    """Get, update, or delete a subscription"""
+    queryset = models.Subscription.objects.all()
+    serializer_class = SubscriptionSerializer
+    
+    def perform_update(self, serializer):
+        """Track subscription changes in history"""
+        old_subscription = self.get_object()
+        new_subscription = serializer.save()
+        
+        # Determine action
+        action = 'updated'
+        if old_subscription.status != new_subscription.status:
+            if new_subscription.status == 'cancelled':
+                action = 'cancelled'
+            elif old_subscription.status == 'pending' and new_subscription.status == 'active':
+                action = 'activated'
+            elif old_subscription.plan != new_subscription.plan:
+                action = 'upgraded' if new_subscription.plan.price > old_subscription.plan.price else 'downgraded'
+        
+        # Create history entry
+        models.SubscriptionHistory.objects.create(
+            subscription=new_subscription,
+            action=action,
+            old_status=old_subscription.status,
+            new_status=new_subscription.status,
+            old_plan=old_subscription.plan,
+            new_plan=new_subscription.plan,
+            changed_by='admin'
+        )
+
+
+@csrf_exempt
+def activate_subscription(request, subscription_id):
+    """Activate a pending subscription"""
+    try:
+        subscription = models.Subscription.objects.get(id=subscription_id)
+        subscription.activate()
+        
+        return JsonResponse({
+            'bool': True,
+            'message': 'Subscription activated successfully',
+            'subscription': {
+                'id': subscription.id,
+                'status': subscription.status,
+                'activated_at': subscription.activated_at.isoformat()
+            }
+        })
+    except models.Subscription.DoesNotExist:
+        return JsonResponse({'bool': False, 'message': 'Subscription not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'bool': False, 'message': str(e)}, status=400)
+
+
+@csrf_exempt
+def cancel_subscription(request, subscription_id):
+    """Cancel an active subscription"""
+    try:
+        subscription = models.Subscription.objects.get(id=subscription_id)
+        subscription.cancel()
+        
+        return JsonResponse({
+            'bool': True,
+            'message': 'Subscription cancelled successfully',
+            'subscription': {
+                'id': subscription.id,
+                'status': subscription.status,
+                'cancelled_at': subscription.cancelled_at.isoformat()
+            }
+        })
+    except models.Subscription.DoesNotExist:
+        return JsonResponse({'bool': False, 'message': 'Subscription not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'bool': False, 'message': str(e)}, status=400)
+
+
+class SubscriptionHistoryList(generics.ListAPIView):
+    """Get subscription history"""
+    serializer_class = SubscriptionHistorySerializer
+    pagination_class = StandardResultSetPagination
+    
+    def get_queryset(self):
+        queryset = models.SubscriptionHistory.objects.all()
+        
+        # Filter by subscription if specified
+        subscription_id = self.request.query_params.get('subscription_id', None)
+        if subscription_id:
+            queryset = queryset.filter(subscription_id=subscription_id)
+        
+        # Filter by student
+        student_id = self.request.query_params.get('student_id', None)
+        if student_id:
+            queryset = queryset.filter(subscription__student_id=student_id)
+        
+        return queryset.order_by('-created_at')
+
+
+@csrf_exempt
+def create_payment_intent(request):
+    """Create a Stripe payment intent for subscription"""
+    import json
+    import stripe
+    import os
+    
+    print("\n" + "="*80)
+    print(f"🔍 PAYMENT INTENT REQUEST RECEIVED")
+    print(f"Method: {request.method}")
+    print(f"Content-Type: {request.headers.get('Content-Type')}")
+    print(f"Request body length: {len(request.body)} bytes")
+    print("="*80)
+    
+    # Set Stripe API key from environment
+    stripe_secret_key = os.environ.get('STRIPE_SECRET_KEY')
+    if not stripe_secret_key:
+        print("❌ STRIPE_SECRET_KEY not configured")
+        return JsonResponse({
+            'error': 'Stripe API key not configured. Please set STRIPE_SECRET_KEY environment variable.'
+        }, status=500)
+    
+    print(f"✅ STRIPE_SECRET_KEY found")
+    print(f"   Key length: {len(stripe_secret_key)} chars")
+    print(f"   First 20 chars: {stripe_secret_key[:20]}")
+    print(f"   Last 20 chars: {stripe_secret_key[-20:]}")
+    print(f"   Full key: {stripe_secret_key}")
+    stripe.api_key = stripe_secret_key
+    
+    if request.method == 'POST':
+        try:
+            print("\n📥 Attempting to parse JSON from request body...")
+            print(f"Raw body: {request.body[:200]}...")  # Print first 200 chars
+            
+            data = json.loads(request.body)
+            print(f"\n✅ JSON parsed successfully!")
+            print(f"📊 Full data: {data}")
+            
+            amount = data.get('amount')
+            plan_id = data.get('plan_id')
+            student_id = data.get('student_id')
+            email = data.get('email')
+            name = data.get('name')
+            
+            # Print each field
+            print(f"\n📋 Received fields:")
+            print(f"   amount: {amount} (type: {type(amount).__name__})")
+            print(f"   plan_id: {plan_id} (type: {type(plan_id).__name__})")
+            print(f"   student_id: {student_id} (type: {type(student_id).__name__})")
+            print(f"   email: {email}")
+            print(f"   name: {name}")
+            
+            # Validate required fields
+            if not all([amount, plan_id, student_id, email, name]):
+                missing_fields = []
+                if not amount: missing_fields.append('amount')
+                if not plan_id: missing_fields.append('plan_id')
+                if not student_id: missing_fields.append('student_id')
+                if not email: missing_fields.append('email')
+                if not name: missing_fields.append('name')
+                
+                error_msg = f'Missing required fields: {", ".join(missing_fields)}'
+                print(f"\n❌ {error_msg}")
+                print(f"Received: {data}")
+                return JsonResponse({
+                    'error': error_msg,
+                    'received_fields': {
+                        'amount': amount,
+                        'plan_id': plan_id,
+                        'student_id': student_id,
+                        'email': email,
+                        'name': name
+                    }
+                }, status=400)
+            
+            if amount <= 0:
+                print(f"\n❌ Invalid amount: {amount}")
+                return JsonResponse({'error': 'Invalid amount'}, status=400)
+            
+            print(f"\n✅ All validations passed!")
+            
+            # Verify the plan exists
+            try:
+                plan = models.SubscriptionPlan.objects.get(id=plan_id)
+                print(f"✅ Plan found: {plan.name} (id: {plan_id})")
+            except models.SubscriptionPlan.DoesNotExist:
+                print(f"❌ Plan not found with id: {plan_id}")
+                return JsonResponse({'error': 'Plan not found'}, status=404)
+            
+            # Verify the student exists
+            try:
+                student = models.Student.objects.get(id=student_id)
+                print(f"✅ Student found: {student.fullname} (id: {student_id})")
+            except models.Student.DoesNotExist:
+                print(f"❌ Student not found with id: {student_id}")
+                return JsonResponse({'error': 'Student not found'}, status=404)
+            
+            print(f"\n🔐 Creating Stripe Payment Intent...")
+            print(f"   Amount: {int(amount)} cents (${amount/100})")
+            print(f"   Currency: USD")
+            print(f"   Description: Subscription to {plan.name} plan")
+            
+            # Create Stripe payment intent
+            intent = stripe.PaymentIntent.create(
+                amount=int(amount),
+                currency='usd',
+                description=f'Subscription to {plan.name} plan',
+                metadata={
+                    'plan_id': str(plan_id),
+                    'plan_name': plan.name,
+                    'student_id': str(student_id),
+                    'student_email': email,
+                    'student_name': name
+                },
+                receipt_email=email
+            )
+            
+            print(f"✅ Payment intent created successfully!")
+            print(f"   Intent ID: {intent.id}")
+            print(f"   Client Secret: {intent.client_secret[:30]}...")
+            print("="*80 + "\n")
+            
+            return JsonResponse({
+                'clientSecret': intent.client_secret,
+                'paymentIntentId': intent.id,
+                'status': 'success'
+            })
+        except stripe.error.CardError as e:
+            print(f"\n❌ Stripe Card Error: {str(e.user_message)}")
+            return JsonResponse({'error': f'Card error: {str(e.user_message)}'}, status=400)
+        except stripe.error.RateLimitError:
+            print(f"\n❌ Stripe Rate Limit Error")
+            return JsonResponse({'error': 'Rate limit exceeded. Please try again later.'}, status=400)
+        except stripe.error.InvalidRequestError as e:
+            print(f"\n❌ Stripe Invalid Request: {str(e)}")
+            print(f"Details: {e.http_body}")
+            return JsonResponse({'error': f'Invalid request: {str(e)}'}, status=400)
+        except stripe.error.AuthenticationError as e:
+            print(f"\n❌ Stripe Authentication Error!")
+            print(f"Error message: {str(e)}")
+            print(f"HTTP status: {e.http_status}")
+            print(f"HTTP body: {e.http_body}")
+            print(f"This usually means your Stripe API key is invalid or expired.")
+            return JsonResponse({
+                'error': 'Stripe authentication failed - Invalid API key',
+                'details': str(e)
+            }, status=400)
+        except stripe.error.APIConnectionError as e:
+            print(f"\n❌ Stripe API Connection Error")
+            print(f"Error: {str(e)}")
+            return JsonResponse({'error': 'Network connection error. Please try again.'}, status=400)
+        except stripe.error.StripeError as e:
+            print(f"\n❌ Stripe Error: {str(e)}")
+            print(f"Type: {type(e).__name__}")
+            return JsonResponse({'error': f'Stripe error: {str(e)}'}, status=400)
+        except json.JSONDecodeError as e:
+            print(f"\n❌ JSON Decode Error: {str(e)}")
+            print(f"Request body was: {request.body}")
+            return JsonResponse({'error': 'Invalid JSON in request body'}, status=400)
+        except Exception as e:
+            import traceback
+            print(f"\n❌ Unexpected Error: {str(e)}")
+            print(traceback.format_exc())
+            return JsonResponse({'error': f'Server error: {str(e)}'}, status=500)
+    
+    print(f"\n❌ Invalid request method: {request.method}")
+    return JsonResponse({'error': 'Invalid request method. Use POST.'}, status=405)
+
+
+@csrf_exempt
+def get_admin_subscription_stats(request):
+    """Get subscription statistics for admin dashboard"""
+    try:
+        total_plans = models.SubscriptionPlan.objects.filter(status='active').count()
+        total_subscriptions = models.Subscription.objects.count()
+        active_subscriptions = models.Subscription.objects.filter(status='active').count()
+        pending_subscriptions = models.Subscription.objects.filter(status='pending').count()
+        cancelled_subscriptions = models.Subscription.objects.filter(status='cancelled').count()
+        
+        # Get total revenue
+        from django.db.models import Sum
+        total_revenue = models.Subscription.objects.filter(
+            is_paid=True
+        ).aggregate(total=Sum('price_paid'))['total'] or 0
+        
+        # Get popular plans
+        popular_plans = models.SubscriptionPlan.objects.annotate(
+            subscriber_count=models.Count('subscriptions')
+        ).order_by('-subscriber_count')[:5]
+        
+        popular_plans_data = []
+        for plan in popular_plans:
+            popular_plans_data.append({
+                'id': plan.id,
+                'name': plan.name,
+                'subscriber_count': plan.subscriber_count,
+                'price': str(plan.price)
+            })
+        
+        return JsonResponse({
+            'bool': True,
+            'stats': {
+                'total_plans': total_plans,
+                'total_subscriptions': total_subscriptions,
+                'active_subscriptions': active_subscriptions,
+                'pending_subscriptions': pending_subscriptions,
+                'cancelled_subscriptions': cancelled_subscriptions,
+                'total_revenue': float(total_revenue),
+                'popular_plans': popular_plans_data
+            }
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'bool': False, 'message': str(e)}, status=200)
+
 

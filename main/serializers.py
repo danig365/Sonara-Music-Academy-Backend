@@ -394,20 +394,7 @@ class SchoolCourseSerializer(serializers.ModelSerializer):
             self.Meta.depth = 2
 
 
-class SubscriptionSerializer(serializers.ModelSerializer):
-    is_valid = serializers.BooleanField(read_only=True)
-    
-    class Meta:
-        model = models.Subscription
-        fields = ['id', 'school', 'plan', 'status', 'price', 'start_date', 
-                  'end_date', 'auto_renew', 'created_at', 'is_valid']
 
-    def __init__(self, *args, **kwargs):
-        super(SubscriptionSerializer, self).__init__(*args, **kwargs)
-        request = self.context.get('request')
-        if request and request.method in ['POST', 'PUT', 'PATCH']:
-            self.Meta.depth = 0
-        else:
             self.Meta.depth = 1
 
 
@@ -723,3 +710,74 @@ class TeacherOverviewSerializer(serializers.Serializer):
     
     # Upcoming sessions (next 5)
     upcoming_sessions = TeacherSessionSerializer(many=True)
+
+
+# ==================== SUBSCRIPTION SERIALIZERS ====================
+
+class SubscriptionPlanSerializer(serializers.ModelSerializer):
+    features_list = serializers.SerializerMethodField()
+    final_price = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = models.SubscriptionPlan
+        fields = ['id', 'name', 'description', 'duration', 'price', 'discount_price', 
+                  'max_courses', 'max_lessons', 'lessons_per_week', 'features', 
+                  'features_list', 'final_price', 'status', 'is_featured', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at', 'features_list', 'final_price']
+    
+    def get_features_list(self, obj):
+        return obj.get_features_list()
+    
+    def get_final_price(self, obj):
+        return str(obj.get_final_price())
+
+
+class SubscriptionSerializer(serializers.ModelSerializer):
+    plan_details = SubscriptionPlanSerializer(source='plan', read_only=True)
+    student_details = serializers.SerializerMethodField()
+    is_active_status = serializers.SerializerMethodField()
+    days_remaining = serializers.SerializerMethodField()
+    can_access_course = serializers.SerializerMethodField()
+    can_access_lesson = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = models.Subscription
+        fields = ['id', 'student', 'student_details', 'plan', 'plan_details', 'status', 
+                  'price_paid', 'is_paid', 'payment_date', 'start_date', 'end_date', 
+                  'activated_at', 'cancelled_at', 'courses_accessed', 'lessons_accessed', 
+                  'current_week_lessons', 'lessons_used_this_month', 'last_reset_date',
+                  'auto_renew', 'is_active_status', 'days_remaining', 
+                  'can_access_course', 'can_access_lesson', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at', 'activated_at', 'cancelled_at']
+    
+    def get_student_details(self, obj):
+        return {
+            'id': obj.student.id,
+            'fullname': obj.student.fullname,
+            'email': obj.student.email,
+            'profile_img': obj.student.profile_img.url if obj.student.profile_img else None
+        }
+    
+    def get_is_active_status(self, obj):
+        return obj.is_active()
+    
+    def get_days_remaining(self, obj):
+        return obj.days_remaining()
+    
+    def get_can_access_course(self, obj):
+        return obj.can_access_course()
+    
+    def get_can_access_lesson(self, obj):
+        return obj.can_access_lesson()
+
+
+class SubscriptionHistorySerializer(serializers.ModelSerializer):
+    old_plan_details = SubscriptionPlanSerializer(source='old_plan', read_only=True)
+    new_plan_details = SubscriptionPlanSerializer(source='new_plan', read_only=True)
+    
+    class Meta:
+        model = models.SubscriptionHistory
+        fields = ['id', 'subscription', 'action', 'old_status', 'new_status', 
+                  'old_plan', 'old_plan_details', 'new_plan', 'new_plan_details', 
+                  'notes', 'changed_by', 'created_at']
+        read_only_fields = ['created_at']

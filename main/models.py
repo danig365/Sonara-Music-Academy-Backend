@@ -458,40 +458,6 @@ class SchoolCourse(models.Model):
 
 
 
-class Subscription(models.Model):
-    PLAN_CHOICES = [
-        ('free', 'Free'),
-        ('basic', 'Basic'),
-        ('pro', 'Professional'),
-        ('enterprise', 'Enterprise'),
-    ]
-    STATUS_CHOICES = [
-        ('active', 'Active'),
-        ('expired', 'Expired'),
-        ('cancelled', 'Cancelled'),
-        ('pending', 'Pending'),
-    ]
-    
-    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='subscriptions')
-    plan = models.CharField(max_length=20, choices=PLAN_CHOICES, default='free')
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
-    price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    start_date = models.DateField()
-    end_date = models.DateField()
-    auto_renew = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        verbose_name_plural = "23. Subscriptions"
-
-    def __str__(self):
-        return f"{self.school.name} - {self.plan}"
-
-    def is_valid(self):
-        from datetime import date
-        return self.status == 'active' and self.end_date >= date.today()
-
-
 class ActivityLog(models.Model):
     ACTION_CHOICES = [
         ('login', 'Login'),
@@ -1103,3 +1069,182 @@ class TeacherDashboardMetrics(models.Model):
             self.completion_change_percent = 0
         
         self.save()
+
+
+# ==================== SUBSCRIPTIONS MANAGEMENT ====================
+
+class SubscriptionPlan(models.Model):
+    """Subscription plan definitions"""
+    DURATION_CHOICES = [
+        ('monthly', 'Monthly'),
+        ('quarterly', 'Quarterly'),
+        ('semi_annual', 'Semi-Annual'),
+        ('annual', 'Annual'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('inactive', 'Inactive'),
+        ('archived', 'Archived'),
+    ]
+    
+    name = models.CharField(max_length=100)
+    description = models.TextField(null=True, blank=True)
+    duration = models.CharField(max_length=20, choices=DURATION_CHOICES, default='monthly')
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    discount_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    max_courses = models.IntegerField(default=10, help_text="Maximum courses students can enroll in")
+    max_lessons = models.IntegerField(default=100, help_text="Maximum lessons they can access")
+    lessons_per_week = models.IntegerField(null=True, blank=True, help_text="Max lessons per week (None = unlimited)")
+    features = models.TextField(null=True, blank=True, help_text="Comma-separated features")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    is_featured = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "50. Subscription Plans"
+        ordering = ['price']
+
+    def __str__(self):
+        return f"{self.name} ({self.duration})"
+
+    def get_features_list(self):
+        """Return features as a list"""
+        if not self.features:
+            return []
+        return [f.strip() for f in self.features.split(',') if f.strip()]
+
+    def get_final_price(self):
+        """Get final price (discount if available)"""
+        return self.discount_price if self.discount_price else self.price
+
+
+class Subscription(models.Model):
+    """Student subscription records"""
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('pending', 'Pending'),
+        ('cancelled', 'Cancelled'),
+        ('expired', 'Expired'),
+        ('paused', 'Paused'),
+    ]
+    
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='subscriptions', null=True, blank=True)
+    plan = models.ForeignKey(SubscriptionPlan, on_delete=models.SET_NULL, null=True, blank=True, related_name='subscriptions')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    # Pricing and payment
+    price_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    is_paid = models.BooleanField(default=False)
+    payment_date = models.DateTimeField(null=True, blank=True)
+    
+    # Dates
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    last_reset_date = models.DateField(null=True, blank=True)
+    activated_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    
+    # Tracking
+    courses_accessed = models.IntegerField(default=0)
+    lessons_accessed = models.IntegerField(default=0)
+    lessons_used_this_month = models.IntegerField(default=0)
+    current_week_lessons = models.IntegerField(default=0, help_text="Lessons accessed in current week")
+    auto_renew = models.BooleanField(default=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "51. Subscriptions"
+        ordering = ['-created_at']
+        unique_together = ['student', 'plan', 'start_date']
+
+    def __str__(self):
+        plan_name = self.plan.name if self.plan else "No Plan"
+        return f"{self.student.fullname} - {plan_name} ({self.status})"
+
+    def is_active(self):
+        """Check if subscription is currently active"""
+        from django.utils import timezone
+        today = timezone.now().date()
+        return (self.status == 'active' and 
+                self.start_date <= today <= self.end_date)
+
+    def days_remaining(self):
+        """Calculate remaining days"""
+        from django.utils import timezone
+        if self.is_active():
+            return (self.end_date - timezone.now().date()).days
+        return 0
+
+    def can_access_course(self):
+        """Check if student can access more courses"""
+        if not self.plan or not self.is_active():
+            return False
+        return self.courses_accessed < self.plan.max_courses
+
+    def can_access_lesson(self):
+        """Check if student can access more lessons"""
+        if not self.plan or not self.is_active():
+            return False
+        
+        # Check total lessons limit
+        if self.lessons_accessed >= self.plan.max_lessons:
+            return False
+        
+        # Check weekly limit if set
+        if self.plan.lessons_per_week:
+            if self.current_week_lessons >= self.plan.lessons_per_week:
+                return False
+        
+        return True
+
+    def activate(self):
+        """Activate the subscription"""
+        from django.utils import timezone
+        if self.status == 'pending':
+            self.status = 'active'
+            self.activated_at = timezone.now()
+            self.is_paid = True
+            self.payment_date = timezone.now()
+            self.save()
+
+    def cancel(self):
+        """Cancel the subscription"""
+        from django.utils import timezone
+        self.status = 'cancelled'
+        self.cancelled_at = timezone.now()
+        self.save()
+
+
+class SubscriptionHistory(models.Model):
+    """Track subscription changes and history"""
+    ACTION_CHOICES = [
+        ('created', 'Created'),
+        ('activated', 'Activated'),
+        ('cancelled', 'Cancelled'),
+        ('renewed', 'Renewed'),
+        ('upgraded', 'Upgraded'),
+        ('downgraded', 'Downgraded'),
+        ('paused', 'Paused'),
+        ('resumed', 'Resumed'),
+    ]
+    
+    subscription = models.ForeignKey(Subscription, on_delete=models.CASCADE, related_name='history')
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    old_status = models.CharField(max_length=20, null=True, blank=True)
+    new_status = models.CharField(max_length=20, null=True, blank=True)
+    old_plan = models.ForeignKey(SubscriptionPlan, on_delete=models.SET_NULL, null=True, blank=True, related_name='old_subscriptions')
+    new_plan = models.ForeignKey(SubscriptionPlan, on_delete=models.SET_NULL, null=True, blank=True, related_name='new_subscriptions')
+    notes = models.TextField(null=True, blank=True)
+    changed_by = models.CharField(max_length=100, null=True, blank=True)  # Admin or system
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = "52. Subscription History"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.subscription.student.fullname} - {self.action}"

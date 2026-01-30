@@ -18,6 +18,3 @@ python-dotenv
 requests
 sqlparse
 stripe
-typing-extensions
-urllib3
-whitenoise
