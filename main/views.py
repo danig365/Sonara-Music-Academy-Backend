@@ -22,8 +22,9 @@ class TeacherList(generics.ListCreateAPIView):
 
     def get_queryset(self):
         if 'popular' in self.request.GET:
-            sql="SELECT *,COUNT(c.id) as total_course FROM main_teacher as t INNER JOIN main_course as c ON c.teacher_id=t.id GROUP BY t.id ORDER BY total_course desc"  
+            sql="SELECT t.id, t.full_name, t.email, t.password, t.mobile_no, t.qualification, t.skills, t.profile_img, COUNT(c.id) as total_course FROM main_teacher as t LEFT JOIN main_course as c ON c.teacher_id=t.id GROUP BY t.id, t.full_name, t.email, t.password, t.mobile_no, t.qualification, t.skills, t.profile_img ORDER BY total_course desc"  
             return models.Teacher.objects.raw(sql)
+        return models.Teacher.objects.all()
 
 class TeacherDetail(generics.RetrieveUpdateDestroyAPIView):
     queryset=models.Teacher.objects.all()
@@ -185,10 +186,10 @@ class CourseRatingList(generics.ListCreateAPIView):
 
     def get_queryset(self):
         if 'popular' in self.request.GET:
-            sql="SELECT *, AVG(cr.rating) as avg_rating FROM main_courserating as cr INNER JOIN main_course as c ON cr.course_id=c.id GROUP BY c.id ORDER BY avg_rating desc LIMIT 3"
+            sql="SELECT cr.id, cr.course_id, cr.student_id, cr.rating, cr.reviews, cr.review_time, AVG(cr.rating) as avg_rating FROM main_courserating as cr INNER JOIN main_course as c ON cr.course_id=c.id GROUP BY cr.id, cr.course_id, cr.student_id, cr.rating, cr.reviews, cr.review_time ORDER BY avg_rating desc LIMIT 3"
             return models.CourseRating.objects.raw(sql)
         if 'all' in self.request.GET:
-            sql="SELECT *, AVG(cr.rating) as avg_rating FROM main_courserating as cr INNER JOIN main_course as c ON cr.course_id=c.id GROUP BY c.id ORDER BY avg_rating desc"
+            sql="SELECT cr.id, cr.course_id, cr.student_id, cr.rating, cr.reviews, cr.review_time, AVG(cr.rating) as avg_rating FROM main_courserating as cr INNER JOIN main_course as c ON cr.course_id=c.id GROUP BY cr.id, cr.course_id, cr.student_id, cr.rating, cr.reviews, cr.review_time ORDER BY avg_rating desc"
             return models.CourseRating.objects.raw(sql)
         return models.CourseRating.objects.filter(course__isnull=False).order_by('-rating')
 
@@ -659,45 +660,136 @@ def admin_delete_course(request, course_id):
     """Delete a course and all its related data (admin only)"""
     try:
         course = models.Course.objects.get(id=course_id)
+        print(f'=== DELETING COURSE ===')
+        print(f'Course ID: {course_id}, Title: {course.title}')
         
         # Delete all related records to avoid foreign key constraint errors
-        # Delete student enrollments
-        models.StudentCourseEnrollment.objects.filter(course=course).delete()
+        # Get all chapters for this course first
+        chapters = models.Chapter.objects.filter(course=course)
+        chapter_ids = list(chapters.values_list('id', flat=True))
+        print(f'Found {len(chapter_ids)} chapters to delete')
         
-        # Delete course ratings
-        models.CourseRating.objects.filter(course=course).delete()
-        
-        # Delete student favorite courses
-        models.StudentFavoriteCourse.objects.filter(course=course).delete()
+        # Delete lesson progress records for lessons in these chapters
+        if chapter_ids:
+            deleted_progress, _ = models.LessonProgress.objects.filter(lesson__chapter_id__in=chapter_ids).delete()
+            print(f'Deleted {deleted_progress} lesson progress records')
         
         # Delete student assignments related to this course
-        models.StudentAssignment.objects.filter(chapter__course=course).delete()
+        deleted_assignments, _ = models.StudentAssignment.objects.filter(chapter__course=course).delete()
+        print(f'Deleted {deleted_assignments} student assignments')
+        
+        # Delete student enrollments
+        deleted_enrollments, _ = models.StudentCourseEnrollment.objects.filter(course=course).delete()
+        print(f'Deleted {deleted_enrollments} enrollments')
+        
+        # Delete course ratings
+        deleted_ratings, _ = models.CourseRating.objects.filter(course=course).delete()
+        print(f'Deleted {deleted_ratings} ratings')
+        
+        # Delete student favorite courses
+        deleted_favorites, _ = models.StudentFavoriteCourse.objects.filter(course=course).delete()
+        print(f'Deleted {deleted_favorites} favorite records')
         
         # Delete chapters and their lessons (cascades automatically if set)
-        models.Chapter.objects.filter(course=course).delete()
-        
-        # Delete lesson progress records
-        models.LessonProgress.objects.filter(lesson__chapter__course=course).delete()
+        deleted_chapters, _ = models.Chapter.objects.filter(course=course).delete()
+        print(f'Deleted {deleted_chapters} chapters and related lessons')
         
         # Finally delete the course
+        course_title = course.title
         course.delete()
-        return JsonResponse({'bool': True, 'message': 'Course deleted successfully'})
+        print(f'Successfully deleted course: {course_title}')
+        
+        return JsonResponse({
+            'bool': True, 
+            'message': f'Course "{course_title}" and all its contents have been deleted successfully'
+        })
     except models.Course.DoesNotExist:
-        return JsonResponse({'bool': False, 'message': 'Course not found'})
+        print(f'Course {course_id} not found')
+        return JsonResponse({
+            'bool': False, 
+            'message': 'Course not found'
+        }, status=404)
     except Exception as e:
-        return JsonResponse({'bool': False, 'message': f'Error deleting course: {str(e)}'})
+        print(f'Error deleting course: {str(e)}')
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'bool': False, 
+            'message': f'Error deleting course: {str(e)}'
+        }, status=500)
 
 
 class AdminCourseCreate(generics.CreateAPIView):
     """Admin create course"""
     queryset = models.Course.objects.all()
     serializer_class = CourseSerializer
+    
+    def create(self, request, *args, **kwargs):
+        print('=' * 50)
+        print('COURSE CREATE REQUEST')
+        print('=' * 50)
+        print(f'Data: {request.data}')
+        print(f'Content-Type: {request.content_type}')
+        
+        # Handle category_name field - convert to category ID
+        data = request.data.copy()
+        if 'category_name' in data:
+            category_name = data.get('category_name', '').strip()
+            if not category_name:
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({'category': ['Category name cannot be empty']})
+            
+            # Try to find existing category, or create new one
+            category, created = models.CourseCategory.objects.get_or_create(
+                title__iexact=category_name,
+                defaults={'title': category_name, 'description': f'Category for {category_name} courses'}
+            )
+            data['category'] = category.id
+            print(f'Category: {category.title} (id: {category.id}) - Created: {created}')
+        
+        request._full_data = data
+        
+        # Try to create with better error logging
+        try:
+            response = super().create(request, *args, **kwargs)
+            return response
+        except Exception as e:
+            print(f'ERROR: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            raise
 
 
 class AdminCourseDetail(generics.RetrieveUpdateDestroyAPIView):
     """Admin view/edit/delete single course"""
     queryset = models.Course.objects.all()
     serializer_class = CourseSerializer
+    
+    def update(self, request, *args, **kwargs):
+        # Handle category_name field - convert to category ID
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        if 'category_name' in data:
+            category_name = data.get('category_name', '').strip()
+            if category_name:
+                # Try to find existing category, or create new one
+                category, created = models.CourseCategory.objects.get_or_create(
+                    title__iexact=category_name,
+                    defaults={'title': category_name, 'description': f'Category for {category_name} courses'}
+                )
+                data['category'] = category.id
+                print(f'Updated Category: {category.title} (id: {category.id}) - Created: {created}')
+        
+        # Update the request data with the modified data
+        if isinstance(request.data, dict):
+            request.data.update(data)
+        else:
+            request._full_data = data
+        
+        print(f'=== COURSE UPDATE ===')
+        print(f'Course ID: {kwargs.get("pk")}')
+        print(f'Update Data: {dict(data)}')
+        
+        return super().update(request, *args, **kwargs)
 
 
 # ==================== ENHANCED STUDENT DASHBOARD VIEWS ====================
@@ -2862,6 +2954,25 @@ class SubscriptionPlanList(generics.ListCreateAPIView):
         if status:
             queryset = queryset.filter(status=status)
         return queryset.order_by('-created_at')
+    
+    def create(self, request, *args, **kwargs):
+        """Create with detailed logging"""
+        print('=' * 50)
+        print('SUBSCRIPTION PLAN CREATE REQUEST')
+        print('=' * 50)
+        print(f'Request data: {request.data}')
+        print(f'Request content type: {request.content_type}')
+        
+        try:
+            response = super().create(request, *args, **kwargs)
+            print('Plan created successfully')
+            return response
+        except Exception as e:
+            print(f'ERROR CREATING PLAN: {e}')
+            print(f'Error type: {type(e).__name__}')
+            import traceback
+            print(traceback.format_exc())
+            raise
 
 
 class SubscriptionPlanDetail(generics.RetrieveUpdateDestroyAPIView):
@@ -3187,14 +3298,14 @@ def get_admin_subscription_stats(request):
         cancelled_subscriptions = models.Subscription.objects.filter(status='cancelled').count()
         
         # Get total revenue
-        from django.db.models import Sum
+        from django.db.models import Sum, Count
         total_revenue = models.Subscription.objects.filter(
             is_paid=True
         ).aggregate(total=Sum('price_paid'))['total'] or 0
         
         # Get popular plans
         popular_plans = models.SubscriptionPlan.objects.annotate(
-            subscriber_count=models.Count('subscriptions')
+            subscriber_count=Count('subscriptions')
         ).order_by('-subscriber_count')[:5]
         
         popular_plans_data = []
@@ -3224,3 +3335,1072 @@ def get_admin_subscription_stats(request):
         return JsonResponse({'bool': False, 'message': str(e)}, status=200)
 
 
+# ==================== ACCESS CONTROL VIEWS ====================
+
+from .access_control import (
+    SubscriptionAccessControl, 
+    get_student_access_summary,
+    validate_course_for_enrollment
+)
+
+
+@csrf_exempt
+def check_subscription_access(request, student_id):
+    """
+    Check if student has active subscription and return access details.
+    GET /api/access/check-subscription/<student_id>/
+    """
+    try:
+        has_sub, subscription, msg = SubscriptionAccessControl.check_subscription_status(student_id)
+        
+        response_data = {
+            'has_active_subscription': has_sub,
+            'message': msg,
+        }
+        
+        if subscription:
+            response_data['subscription'] = {
+                'id': subscription.id,
+                'status': subscription.status,
+                'plan_name': subscription.plan.name if subscription.plan else None,
+                'plan_id': subscription.plan.id if subscription.plan else None,
+                'access_level': subscription.plan.access_level if subscription.plan else None,
+                'start_date': subscription.start_date.isoformat() if subscription.start_date else None,
+                'end_date': subscription.end_date.isoformat() if subscription.end_date else None,
+                'days_remaining': subscription.days_remaining(),
+                'is_paid': subscription.is_paid,
+                'assigned_teacher': {
+                    'id': subscription.assigned_teacher.id,
+                    'name': subscription.assigned_teacher.full_name
+                } if subscription.assigned_teacher else None,
+            }
+            
+            if has_sub:
+                response_data['usage'] = subscription.get_usage_summary()
+        
+        return JsonResponse(response_data)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'error': str(e),
+            'has_active_subscription': False
+        }, status=500)
+
+
+@csrf_exempt
+def check_course_access(request, student_id, course_id):
+    """
+    Check if student can access/enroll in a specific course.
+    GET /api/access/course/<student_id>/<course_id>/
+    """
+    try:
+        # First check if already enrolled - if so, allow access
+        already_enrolled = models.StudentCourseEnrollment.objects.filter(
+            student_id=student_id,
+            course_id=course_id
+        ).exists()
+        if already_enrolled:
+            return JsonResponse({
+                'can_access': True,
+                'can_enroll': False,
+                'message': 'You are already enrolled in this course.',
+                'validation': {'enrolled': True}
+            })
+        
+        # If not enrolled, check if can enroll
+        can_enroll, msg = SubscriptionAccessControl.can_enroll_in_course(student_id, course_id)
+        
+        # Get additional validation details
+        validation = validate_course_for_enrollment(student_id, course_id)
+        
+        return JsonResponse({
+            'can_access': can_enroll,
+            'can_enroll': can_enroll,
+            'message': msg,
+            'validation': validation
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'can_access': False,
+            'can_enroll': False,
+            'error': str(e)
+        }, status=500)
+
+
+@csrf_exempt
+def check_lesson_access(request, student_id, lesson_id):
+    """
+    Check if student can access a specific lesson.
+    GET /api/access/lesson/<student_id>/<lesson_id>/
+    """
+    try:
+        can_access, msg, subscription = SubscriptionAccessControl.can_access_lesson(student_id, lesson_id)
+        
+        response_data = {
+            'can_access': can_access,
+            'message': msg
+        }
+        
+        if subscription:
+            response_data['usage'] = subscription.get_usage_summary()
+        
+        # Get lesson details for context
+        try:
+            lesson = models.ModuleLesson.objects.select_related('module', 'module__course').get(id=lesson_id)
+            response_data['lesson'] = {
+                'id': lesson.id,
+                'title': lesson.title,
+                'is_preview': lesson.is_preview,
+                'required_access_level': lesson.required_access_level,
+                'course_title': lesson.module.course.title if lesson.module and lesson.module.course else None
+            }
+        except models.ModuleLesson.DoesNotExist:
+            pass
+        
+        return JsonResponse(response_data)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'can_access': False,
+            'error': str(e)
+        }, status=500)
+
+
+@csrf_exempt
+def record_lesson_access(request, student_id, lesson_id):
+    """
+    Record that a student accessed a lesson (updates usage counters).
+    POST /api/access/record-lesson/<student_id>/<lesson_id>/
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required'}, status=405)
+    
+    try:
+        success, msg = SubscriptionAccessControl.record_lesson_access(student_id, lesson_id)
+        
+        if success:
+            subscription = SubscriptionAccessControl.get_active_subscription(student_id)
+            return JsonResponse({
+                'success': True,
+                'message': msg,
+                'usage': subscription.get_usage_summary() if subscription else None
+            })
+        else:
+            return JsonResponse({
+                'success': False,
+                'message': msg
+            }, status=403)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+@csrf_exempt
+def enroll_with_subscription(request):
+    """
+    Enroll student in course with subscription validation.
+    POST /api/access/enroll/
+    Body: { "student_id": int, "course_id": int }
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required'}, status=405)
+    
+    try:
+        import json
+        data = json.loads(request.body)
+        student_id = data.get('student_id')
+        course_id = data.get('course_id')
+        
+        if not student_id or not course_id:
+            return JsonResponse({
+                'success': False,
+                'error': 'student_id and course_id are required'
+            }, status=400)
+        
+        success, enrollment, msg = SubscriptionAccessControl.enroll_student_in_course(student_id, course_id)
+        
+        if success:
+            subscription = SubscriptionAccessControl.get_active_subscription(student_id)
+            return JsonResponse({
+                'success': True,
+                'message': msg,
+                'enrollment_id': enrollment.id,
+                'usage': subscription.get_usage_summary() if subscription else None
+            })
+        else:
+            return JsonResponse({
+                'success': False,
+                'message': msg
+            }, status=403)
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'error': 'Invalid JSON in request body'
+        }, status=400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+@csrf_exempt
+def get_student_access_info(request, student_id):
+    """
+    Get complete access summary for a student.
+    GET /api/access/summary/<student_id>/
+    """
+    try:
+        summary = get_student_access_summary(student_id)
+        return JsonResponse(summary)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'error': str(e),
+            'has_active_subscription': False
+        }, status=500)
+
+
+@csrf_exempt
+def get_accessible_courses(request, student_id):
+    """
+    Get list of courses accessible to a student based on their subscription.
+    GET /api/access/courses/<student_id>/
+    """
+    try:
+        subscription = SubscriptionAccessControl.get_active_subscription(student_id)
+        
+        if not subscription:
+            return JsonResponse({
+                'has_subscription': False,
+                'courses': [],
+                'message': 'No active subscription'
+            })
+        
+        courses = subscription.get_accessible_courses()
+        courses_data = []
+        
+        for course in courses.select_related('teacher', 'category')[:50]:  # Limit to 50
+            courses_data.append({
+                'id': course.id,
+                'title': course.title,
+                'description': course.description[:200] if course.description else '',
+                'teacher': course.teacher.full_name if course.teacher else None,
+                'teacher_id': course.teacher.id if course.teacher else None,
+                'category': course.category.title if course.category else None,
+                'category_id': course.category.id if course.category else None,
+                'featured_img': course.featured_img.url if course.featured_img else None,
+                'required_access_level': course.required_access_level,
+            })
+        
+        return JsonResponse({
+            'has_subscription': True,
+            'total_accessible': courses.count(),
+            'courses': courses_data,
+            'usage': subscription.get_usage_summary()
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'error': str(e),
+            'courses': []
+        }, status=500)
+
+
+@csrf_exempt
+def get_assigned_teacher(request, student_id):
+    """
+    Get the teacher assigned to a student's subscription.
+    GET /api/access/assigned-teacher/<student_id>/
+    """
+    try:
+        teacher = SubscriptionAccessControl.get_assigned_teacher(student_id)
+        
+        if teacher:
+            return JsonResponse({
+                'has_assigned_teacher': True,
+                'teacher': {
+                    'id': teacher.id,
+                    'full_name': teacher.full_name,
+                    'email': teacher.email,
+                    'qualification': teacher.qualification,
+                    'profile_img': teacher.profile_img.url if teacher.profile_img else None,
+                    'skills': teacher.skill_list() if teacher.skills else []
+                }
+            })
+        else:
+            return JsonResponse({
+                'has_assigned_teacher': False,
+                'message': 'No teacher assigned to your subscription'
+            })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'error': str(e),
+            'has_assigned_teacher': False
+        }, status=500)
+
+
+@csrf_exempt
+def assign_teacher_to_student(request):
+    """
+    Assign a teacher to a student's subscription.
+    POST /api/access/assign-teacher/
+    Body: { "subscription_id": int, "teacher_id": int }
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required'}, status=405)
+    
+    try:
+        import json
+        data = json.loads(request.body)
+        subscription_id = data.get('subscription_id')
+        teacher_id = data.get('teacher_id')
+        
+        if not subscription_id or not teacher_id:
+            return JsonResponse({
+                'success': False,
+                'error': 'subscription_id and teacher_id are required'
+            }, status=400)
+        
+        success, msg = SubscriptionAccessControl.assign_teacher_to_subscription(subscription_id, teacher_id)
+        
+        return JsonResponse({
+            'success': success,
+            'message': msg
+        }, status=200 if success else 400)
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'error': 'Invalid JSON in request body'
+        }, status=400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+@csrf_exempt
+def upgrade_subscription(request):
+    """
+    Upgrade a subscription to a higher plan.
+    POST /api/access/upgrade/
+    Body: { "subscription_id": int, "new_plan_id": int, "price_difference": float }
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required'}, status=405)
+    
+    try:
+        import json
+        data = json.loads(request.body)
+        subscription_id = data.get('subscription_id')
+        new_plan_id = data.get('new_plan_id')
+        price_difference = data.get('price_difference', 0)
+        
+        if not subscription_id or not new_plan_id:
+            return JsonResponse({
+                'success': False,
+                'error': 'subscription_id and new_plan_id are required'
+            }, status=400)
+        
+        success, msg = SubscriptionAccessControl.upgrade_subscription(
+            subscription_id, new_plan_id, price_difference
+        )
+        
+        return JsonResponse({
+            'success': success,
+            'message': msg
+        }, status=200 if success else 400)
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'error': 'Invalid JSON in request body'
+        }, status=400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+@csrf_exempt
+def downgrade_subscription(request):
+    """
+    Downgrade a subscription to a lower plan.
+    POST /api/access/downgrade/
+    Body: { "subscription_id": int, "new_plan_id": int }
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required'}, status=405)
+    
+    try:
+        import json
+        data = json.loads(request.body)
+        subscription_id = data.get('subscription_id')
+        new_plan_id = data.get('new_plan_id')
+        
+        if not subscription_id or not new_plan_id:
+            return JsonResponse({
+                'success': False,
+                'error': 'subscription_id and new_plan_id are required'
+            }, status=400)
+        
+        success, msg = SubscriptionAccessControl.downgrade_subscription(subscription_id, new_plan_id)
+        
+        return JsonResponse({
+            'success': success,
+            'message': msg
+        }, status=200 if success else 400)
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'error': 'Invalid JSON in request body'
+        }, status=400)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+@csrf_exempt
+def get_subscription_usage(request, student_id):
+    """
+    Get detailed subscription usage for a student.
+    GET /api/access/usage/<student_id>/
+    """
+    try:
+        usage = SubscriptionAccessControl.get_subscription_usage(student_id)
+        return JsonResponse(usage)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'error': str(e),
+            'has_subscription': False
+        }, status=500)
+
+
+@csrf_exempt
+def expire_old_subscriptions(request):
+    """
+    Manually trigger expiration check for subscriptions.
+    Should normally be called by a cron job.
+    POST /api/access/expire-check/
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required'}, status=405)
+    
+    try:
+        count = SubscriptionAccessControl.check_and_expire_subscriptions()
+        return JsonResponse({
+            'success': True,
+            'expired_count': count,
+            'message': f'{count} subscriptions marked as expired'
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+@csrf_exempt
+def get_plan_teachers(request, plan_id):
+    """
+    Get list of teachers available for a subscription plan.
+    GET /api/access/plan-teachers/<plan_id>/
+    """
+    try:
+        plan = models.SubscriptionPlan.objects.get(id=plan_id)
+        
+        allowed_teachers = plan.allowed_teachers.all()
+        
+        # If no specific teachers are set, return all teachers
+        if not allowed_teachers.exists():
+            allowed_teachers = models.Teacher.objects.all()
+            all_teachers_allowed = True
+        else:
+            all_teachers_allowed = False
+        
+        teachers_data = []
+        for teacher in allowed_teachers[:50]:  # Limit to 50
+            teachers_data.append({
+                'id': teacher.id,
+                'full_name': teacher.full_name,
+                'email': teacher.email,
+                'qualification': teacher.qualification,
+                'profile_img': teacher.profile_img.url if teacher.profile_img else None,
+                'skills': teacher.skill_list() if teacher.skills else [],
+                'total_courses': teacher.total_teacher_course()
+            })
+        
+        return JsonResponse({
+            'plan_id': plan.id,
+            'plan_name': plan.name,
+            'all_teachers_allowed': all_teachers_allowed,
+            'teachers_count': len(teachers_data),
+            'teachers': teachers_data
+        })
+    except models.SubscriptionPlan.DoesNotExist:
+        return JsonResponse({
+            'error': 'Plan not found'
+        }, status=404)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'error': str(e)
+        }, status=500)
+
+
+# ==================== ENHANCED ENROLLMENT VIEWS ====================
+
+class ProtectedCourseEnrollView(generics.CreateAPIView):
+    """
+    Protected enrollment endpoint that validates subscription before enrollment.
+    """
+    serializer_class = StudentCourseEnrollSerializer
+    
+    def create(self, request, *args, **kwargs):
+        student_id = request.data.get('student')
+        course_id = request.data.get('course')
+        
+        if not student_id or not course_id:
+            return Response({
+                'error': 'student and course are required'
+            }, status=400)
+        
+        # Validate subscription access
+        can_enroll, msg = SubscriptionAccessControl.can_enroll_in_course(student_id, course_id)
+        
+        if not can_enroll:
+            return Response({
+                'error': msg,
+                'access_denied': True
+            }, status=403)
+        
+        # Get the subscription to link to enrollment
+        subscription = SubscriptionAccessControl.get_active_subscription(student_id)
+        
+        # Create enrollment with subscription link
+        enrollment = models.StudentCourseEnrollment.objects.create(
+            student_id=student_id,
+            course_id=course_id,
+            subscription=subscription
+        )
+        
+        # Record course enrollment in subscription
+        if subscription:
+            subscription.record_course_enrollment()
+        
+        serializer = self.get_serializer(enrollment)
+        return Response({
+            'success': True,
+            'enrollment': serializer.data,
+            'message': 'Successfully enrolled in course',
+            'usage': subscription.get_usage_summary() if subscription else None
+        }, status=201)
+
+
+# ==================== AUDIT LOG VIEWS ====================
+
+from .serializers import UploadLogSerializer, PaymentLogSerializer, AccessLogSerializer
+
+class UploadLogList(generics.ListAPIView):
+    """List all upload logs (admin only)"""
+    queryset = models.UploadLog.objects.all()
+    serializer_class = UploadLogSerializer
+    pagination_class = StandardResultSetPagination
+    
+    def get_queryset(self):
+        qs = super().get_queryset()
+        
+        # Filter by upload type
+        upload_type = self.request.GET.get('upload_type', '')
+        if upload_type:
+            qs = qs.filter(upload_type=upload_type)
+        
+        # Filter by status
+        status = self.request.GET.get('status', '')
+        if status:
+            qs = qs.filter(status=status)
+        
+        # Filter by date range
+        date_from = self.request.GET.get('date_from', '')
+        if date_from:
+            qs = qs.filter(created_at__gte=date_from)
+        
+        date_to = self.request.GET.get('date_to', '')
+        if date_to:
+            qs = qs.filter(created_at__lte=date_to)
+        
+        # Filter by uploader (teacher_id or student_id)
+        teacher_id = self.request.GET.get('teacher_id', '')
+        if teacher_id:
+            qs = qs.filter(teacher_id=teacher_id)
+        
+        student_id = self.request.GET.get('student_id', '')
+        if student_id:
+            qs = qs.filter(student_id=student_id)
+        
+        # Search by file name
+        search = self.request.GET.get('search', '')
+        if search:
+            qs = qs.filter(file_name__icontains=search)
+        
+        return qs.order_by('-created_at')
+
+
+class UploadLogDetail(generics.RetrieveAPIView):
+    """Get detailed upload log entry"""
+    queryset = models.UploadLog.objects.all()
+    serializer_class = UploadLogSerializer
+
+
+@csrf_exempt
+def log_file_upload(request):
+    """Create an upload log entry when a file is uploaded"""
+    import json
+    
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body) if request.body else {}
+            
+            # Determine who uploaded
+            teacher_id = data.get('teacher_id')
+            student_id = data.get('student_id')
+            admin_id = data.get('admin_id')
+            
+            upload_log = models.UploadLog.objects.create(
+                teacher_id=teacher_id,
+                student_id=student_id,
+                admin_id=admin_id,
+                file_name=data.get('file_name', ''),
+                file_type=data.get('file_type', ''),
+                file_size=int(data.get('file_size', 0)),
+                upload_type=data.get('upload_type', 'other'),
+                content_type=data.get('content_type'),
+                object_id=data.get('object_id'),
+                status=data.get('status', 'success'),
+                error_message=data.get('error_message'),
+                file_path=data.get('file_path'),
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+            
+            return JsonResponse({
+                'bool': True,
+                'upload_log_id': upload_log.id,
+                'message': 'Upload logged successfully'
+            })
+        except Exception as e:
+            return JsonResponse({
+                'bool': False,
+                'message': str(e)
+            }, status=400)
+    
+    return JsonResponse({'bool': False, 'message': 'POST method required'}, status=405)
+
+
+class PaymentLogList(generics.ListAPIView):
+    """List all payment logs (admin only)"""
+    queryset = models.PaymentLog.objects.all()
+    serializer_class = PaymentLogSerializer
+    pagination_class = StandardResultSetPagination
+    
+    def get_queryset(self):
+        qs = super().get_queryset()
+        
+        # Filter by payment type
+        payment_type = self.request.GET.get('payment_type', '')
+        if payment_type:
+            qs = qs.filter(payment_type=payment_type)
+        
+        # Filter by status
+        status = self.request.GET.get('status', '')
+        if status:
+            qs = qs.filter(status=status)
+        
+        # Filter by student
+        student_id = self.request.GET.get('student_id', '')
+        if student_id:
+            qs = qs.filter(student_id=student_id)
+        
+        # Filter by plan
+        plan_id = self.request.GET.get('plan_id', '')
+        if plan_id:
+            qs = qs.filter(subscription_plan_id=plan_id)
+        
+        # Filter by date range
+        date_from = self.request.GET.get('date_from', '')
+        if date_from:
+            qs = qs.filter(created_at__gte=date_from)
+        
+        date_to = self.request.GET.get('date_to', '')
+        if date_to:
+            qs = qs.filter(created_at__lte=date_to)
+        
+        # Search by transaction ID
+        search = self.request.GET.get('search', '')
+        if search:
+            qs = qs.filter(transaction_id__icontains=search)
+        
+        return qs.order_by('-created_at')
+
+
+class PaymentLogDetail(generics.RetrieveAPIView):
+    """Get detailed payment log entry"""
+    queryset = models.PaymentLog.objects.all()
+    serializer_class = PaymentLogSerializer
+
+
+@csrf_exempt
+def log_payment(request):
+    """Create a payment log entry when a payment is processed"""
+    import json
+    from django.utils import timezone
+    
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body) if request.body else {}
+            
+            payment_log = models.PaymentLog.objects.create(
+                student_id=data.get('student_id'),
+                subscription_id=data.get('subscription_id'),
+                subscription_plan_id=data.get('plan_id'),
+                transaction_id=data.get('transaction_id', ''),
+                payment_type=data.get('payment_type', 'subscription_purchase'),
+                status=data.get('status', 'pending'),
+                payment_method=data.get('payment_method'),
+                amount=data.get('amount', 0),
+                currency=data.get('currency', 'INR'),
+                tax_amount=data.get('tax_amount', 0),
+                discount_amount=data.get('discount_amount', 0),
+                final_amount=data.get('final_amount', data.get('amount', 0)),
+                gateway_response=data.get('gateway_response'),
+                receipt_url=data.get('receipt_url'),
+                invoice_number=data.get('invoice_number'),
+                error_message=data.get('error_message'),
+                error_code=data.get('error_code'),
+                user_email=data.get('user_email'),
+                user_ip_address=request.META.get('REMOTE_ADDR'),
+                completed_at=timezone.now() if data.get('status') == 'completed' else None
+            )
+            
+            return JsonResponse({
+                'bool': True,
+                'payment_log_id': payment_log.id,
+                'message': 'Payment logged successfully'
+            })
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return JsonResponse({
+                'bool': False,
+                'message': str(e)
+            }, status=400)
+    
+    return JsonResponse({'bool': False, 'message': 'POST method required'}, status=405)
+
+
+class AccessLogList(generics.ListAPIView):
+    """List all access logs (admin only)"""
+    queryset = models.AccessLog.objects.all()
+    serializer_class = AccessLogSerializer
+    pagination_class = StandardResultSetPagination
+    
+    def get_queryset(self):
+        qs = super().get_queryset()
+        
+        # Filter by access type
+        access_type = self.request.GET.get('access_type', '')
+        if access_type:
+            qs = qs.filter(access_type=access_type)
+        
+        # Filter by was_allowed
+        was_allowed = self.request.GET.get('was_allowed', '')
+        if was_allowed:
+            qs = qs.filter(was_allowed=was_allowed.lower() == 'true')
+        
+        # Filter by student
+        student_id = self.request.GET.get('student_id', '')
+        if student_id:
+            qs = qs.filter(student_id=student_id)
+        
+        # Filter by course
+        course_id = self.request.GET.get('course_id', '')
+        if course_id:
+            qs = qs.filter(course_id=course_id)
+        
+        # Filter by date range
+        date_from = self.request.GET.get('date_from', '')
+        if date_from:
+            qs = qs.filter(created_at__gte=date_from)
+        
+        date_to = self.request.GET.get('date_to', '')
+        if date_to:
+            qs = qs.filter(created_at__lte=date_to)
+        
+        return qs.order_by('-created_at')
+
+
+class AccessLogDetail(generics.RetrieveAPIView):
+    """Get detailed access log entry"""
+    queryset = models.AccessLog.objects.all()
+    serializer_class = AccessLogSerializer
+
+
+@csrf_exempt
+def log_access(request):
+    """Create an access log entry when user accesses a resource"""
+    import json
+    
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body) if request.body else {}
+            
+            # Determine who accessed
+            teacher_id = data.get('teacher_id')
+            student_id = data.get('student_id')
+            admin_id = data.get('admin_id')
+            
+            access_log = models.AccessLog.objects.create(
+                teacher_id=teacher_id,
+                student_id=student_id,
+                admin_id=admin_id,
+                access_type=data.get('access_type', 'course_view'),
+                course_id=data.get('course_id'),
+                lesson_id=data.get('lesson_id'),
+                subscription_id=data.get('subscription_id'),
+                was_allowed=data.get('was_allowed', True),
+                denial_reason=data.get('denial_reason'),
+                duration_seconds=data.get('duration_seconds'),
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT', '')
+            )
+            
+            return JsonResponse({
+                'bool': True,
+                'access_log_id': access_log.id,
+                'message': 'Access logged successfully'
+            })
+        except Exception as e:
+            return JsonResponse({
+                'bool': False,
+                'message': str(e)
+            }, status=400)
+    
+    return JsonResponse({'bool': False, 'message': 'POST method required'}, status=405)
+
+
+@csrf_exempt
+def get_audit_summary(request):
+    """Get summary statistics for audit logs"""
+    from django.utils import timezone
+    from datetime import timedelta
+    from django.db.models import Count
+    
+    try:
+        # Get time periods for comparison
+        today = timezone.now().date()
+        last_7_days = timezone.now() - timedelta(days=7)
+        last_30_days = timezone.now() - timedelta(days=30)
+        last_90_days = timezone.now() - timedelta(days=90)
+        
+        # Upload stats
+        total_uploads = models.UploadLog.objects.count()
+        successful_uploads = models.UploadLog.objects.filter(status='success').count()
+        failed_uploads = models.UploadLog.objects.filter(status='failed').count()
+        recent_uploads = models.UploadLog.objects.filter(created_at__gte=last_7_days).count()
+        
+        upload_by_type = models.UploadLog.objects.values('upload_type').annotate(
+            count=Count('id')
+        )
+        
+        # Payment stats
+        total_payments = models.PaymentLog.objects.count()
+        completed_payments = models.PaymentLog.objects.filter(status='completed').count()
+        failed_payments = models.PaymentLog.objects.filter(status='failed').count()
+        pending_payments = models.PaymentLog.objects.filter(status='pending').count()
+        refunded_payments = models.PaymentLog.objects.filter(status='refunded').count()
+        
+        from django.db.models import Sum
+        total_revenue = models.PaymentLog.objects.filter(
+            status='completed'
+        ).aggregate(total=Sum('final_amount'))['total'] or 0
+        
+        recent_payments = models.PaymentLog.objects.filter(created_at__gte=last_7_days).count()
+        
+        payment_by_type = models.PaymentLog.objects.values('payment_type').annotate(
+            count=Count('id')
+        )
+        
+        payment_by_method = models.PaymentLog.objects.values('payment_method').annotate(
+            count=Count('id')
+        )
+        
+        # Access stats
+        total_accesses = models.AccessLog.objects.count()
+        allowed_accesses = models.AccessLog.objects.filter(was_allowed=True).count()
+        denied_accesses = models.AccessLog.objects.filter(was_allowed=False).count()
+        recent_accesses = models.AccessLog.objects.filter(created_at__gte=last_7_days).count()
+        
+        access_by_type = models.AccessLog.objects.values('access_type').annotate(
+            count=Count('id')
+        )
+        
+        # Denial reasons
+        denial_reasons = models.AccessLog.objects.filter(
+            was_allowed=False
+        ).values('denial_reason').annotate(
+            count=Count('id')
+        ).order_by('-count')[:5]
+        
+        return JsonResponse({
+            'bool': True,
+            'summary': {
+                'uploads': {
+                    'total': total_uploads,
+                    'successful': successful_uploads,
+                    'failed': failed_uploads,
+                    'success_rate': (successful_uploads / total_uploads * 100) if total_uploads > 0 else 0,
+                    'recent_7_days': recent_uploads,
+                    'by_type': list(upload_by_type)
+                },
+                'payments': {
+                    'total': total_payments,
+                    'completed': completed_payments,
+                    'failed': failed_payments,
+                    'pending': pending_payments,
+                    'refunded': refunded_payments,
+                    'success_rate': (completed_payments / total_payments * 100) if total_payments > 0 else 0,
+                    'total_revenue': float(total_revenue),
+                    'recent_7_days': recent_payments,
+                    'by_type': list(payment_by_type),
+                    'by_method': list(payment_by_method)
+                },
+                'access': {
+                    'total': total_accesses,
+                    'allowed': allowed_accesses,
+                    'denied': denied_accesses,
+                    'allow_rate': (allowed_accesses / total_accesses * 100) if total_accesses > 0 else 0,
+                    'recent_7_days': recent_accesses,
+                    'by_type': list(access_by_type),
+                    'denial_reasons': list(denial_reasons)
+                }
+            }
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'bool': False,
+            'message': str(e)
+        }, status=500)
+
+
+@csrf_exempt
+def export_audit_logs(request, log_type):
+    """Export audit logs as CSV"""
+    import csv
+    from django.http import HttpResponse
+    
+    try:
+        if log_type == 'uploads':
+            logs = models.UploadLog.objects.all()
+            response = HttpResponse(content_type='text/csv')
+            response['Content-Disposition'] = 'attachment; filename="upload_logs.csv"'
+            
+            writer = csv.writer(response)
+            writer.writerow(['ID', 'Uploader', 'File Name', 'File Type', 'File Size', 'Upload Type', 'Status', 'Created At'])
+            
+            for log in logs:
+                writer.writerow([
+                    log.id,
+                    log.get_user_display(),
+                    log.file_name,
+                    log.file_type,
+                    log.file_size,
+                    log.upload_type,
+                    log.status,
+                    log.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                ])
+            
+            return response
+        
+        elif log_type == 'payments':
+            logs = models.PaymentLog.objects.all()
+            response = HttpResponse(content_type='text/csv')
+            response['Content-Disposition'] = 'attachment; filename="payment_logs.csv"'
+            
+            writer = csv.writer(response)
+            writer.writerow(['ID', 'Student', 'Transaction ID', 'Amount', 'Currency', 'Status', 'Payment Type', 'Created At'])
+            
+            for log in logs:
+                writer.writerow([
+                    log.id,
+                    log.student.fullname if log.student else 'Unknown',
+                    log.transaction_id,
+                    log.final_amount,
+                    log.currency,
+                    log.status,
+                    log.payment_type,
+                    log.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                ])
+            
+            return response
+        
+        elif log_type == 'access':
+            logs = models.AccessLog.objects.all()
+            response = HttpResponse(content_type='text/csv')
+            response['Content-Disposition'] = 'attachment; filename="access_logs.csv"'
+            
+            writer = csv.writer(response)
+            writer.writerow(['ID', 'User', 'Access Type', 'Course', 'Was Allowed', 'Created At'])
+            
+            for log in logs:
+                writer.writerow([
+                    log.id,
+                    log.get_user_display(),
+                    log.access_type,
+                    log.course.title if log.course else 'N/A',
+                    'Yes' if log.was_allowed else 'No',
+                    log.created_at.strftime('%Y-%m-%d %H:%M:%S')
+                ])
+            
+            return response
+        
+        else:
+            return JsonResponse({
+                'bool': False,
+                'message': 'Invalid log type. Use: uploads, payments, or access'
+            }, status=400)
+    
+    except Exception as e:
+        return JsonResponse({
+            'bool': False,
+            'message': str(e)
+        }, status=500)

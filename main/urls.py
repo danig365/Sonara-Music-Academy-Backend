@@ -234,5 +234,73 @@ urlpatterns =[
         
         # Admin Stats
         path('admin/subscription-stats/', views.get_admin_subscription_stats),
+        
+        # ==================== ACCESS CONTROL URLS ====================
+        
+        # Check subscription status
+        path('access/check-subscription/<int:student_id>/', views.check_subscription_access),
+        
+        # Check course access
+        path('access/course/<int:student_id>/<int:course_id>/', views.check_course_access),
+        
+        # Check lesson access
+        path('access/lesson/<int:student_id>/<int:lesson_id>/', views.check_lesson_access),
+        
+        # Record lesson access (updates usage counters)
+        path('access/record-lesson/<int:student_id>/<int:lesson_id>/', views.record_lesson_access),
+        
+        # Enroll with subscription validation
+        path('access/enroll/', views.enroll_with_subscription),
+        
+        # Protected enrollment endpoint
+        path('access/protected-enroll/', views.ProtectedCourseEnrollView.as_view()),
+        
+        # Get student access summary
+        path('access/summary/<int:student_id>/', views.get_student_access_info),
+        
+        # Get accessible courses for a student
+        path('access/courses/<int:student_id>/', views.get_accessible_courses),
+        
+        # Get subscription usage
+        path('access/usage/<int:student_id>/', views.get_subscription_usage),
+        
+        # Get assigned teacher
+        path('access/assigned-teacher/<int:student_id>/', views.get_assigned_teacher),
+        
+        # Assign teacher to subscription
+        path('access/assign-teacher/', views.assign_teacher_to_student),
+        
+        # Get teachers available for a plan
+        path('access/plan-teachers/<int:plan_id>/', views.get_plan_teachers),
+        
+        # Upgrade subscription
+        path('access/upgrade/', views.upgrade_subscription),
+        
+        # Downgrade subscription
+        path('access/downgrade/', views.downgrade_subscription),
+        
+        # Manual expiration check (for admin/cron)
+        path('access/expire-check/', views.expire_old_subscriptions),
+
+        # ==================== AUDIT LOGS URLS ====================
+        
+        # Upload Logs
+        path('audit/uploads/', views.UploadLogList.as_view(), name='upload-logs'),
+        path('audit/uploads/<int:pk>/', views.UploadLogDetail.as_view(), name='upload-log-detail'),
+        path('audit/log-upload/', views.log_file_upload),
+        
+        # Payment Logs
+        path('audit/payments/', views.PaymentLogList.as_view(), name='payment-logs'),
+        path('audit/payments/<int:pk>/', views.PaymentLogDetail.as_view(), name='payment-log-detail'),
+        path('audit/log-payment/', views.log_payment),
+        
+        # Access Logs
+        path('audit/access/', views.AccessLogList.as_view(), name='access-logs'),
+        path('audit/access/<int:pk>/', views.AccessLogDetail.as_view(), name='access-log-detail'),
+        path('audit/log-access/', views.log_access),
+        
+        # Audit Summary & Export
+        path('audit/summary/', views.get_audit_summary),
+        path('audit/export/<str:log_type>/', views.export_audit_logs),
 
 ]

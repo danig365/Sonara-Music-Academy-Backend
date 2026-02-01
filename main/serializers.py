@@ -38,10 +38,12 @@ class CourseSerializer(serializers.ModelSerializer):
     total_enrolled_students = serializers.SerializerMethodField()
     course_rating = serializers.SerializerMethodField()
     course_views = serializers.IntegerField(read_only=True)
+    required_access_level = serializers.CharField(required=False, default='free')
+    is_featured = serializers.BooleanField(required=False, default=False)
     
     class Meta:
         model=models.Course
-        fields=['id','category','teacher','title','description','featured_img','techs','course_chapters','related_videos','teach_list','total_enrolled_students','course_rating','course_views']
+        fields=['id','category','teacher','title','description','featured_img','techs','course_chapters','related_videos','teach_list','total_enrolled_students','course_rating','course_views','required_access_level','is_featured']
     
     def get_course_chapters(self, obj):
         chapters = obj.course_chapters.all().order_by('order', 'id')
@@ -53,11 +55,19 @@ class CourseSerializer(serializers.ModelSerializer):
     def get_course_rating(self, obj):
         return obj.course_rating()
     
+    def validate(self, data):
+        """Validate and log errors"""
+        print('=' * 50)
+        print('COURSE SERIALIZER VALIDATION')
+        print('=' * 50)
+        print(f'Data being validated: {data}')
+        return data
+    
     def __init__(self, *args, **kwargs):
             super(CourseSerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
             if request and request.method == 'POST' or request.method == 'PUT' or request.method == 'PATCH':
-                print('Method is POST')
+                print('Method is POST/PUT/PATCH')
                 self.Meta.depth = 0
                 print(self.Meta.depth)
             else:
@@ -92,12 +102,14 @@ class ModuleLessonSerializer(serializers.ModelSerializer):
     file_size_formatted = serializers.ReadOnlyField()
     objectives_list = serializers.ReadOnlyField()
     downloadables = LessonDownloadableSerializer(many=True, read_only=True)
+    required_access_level = serializers.CharField(read_only=True)
     
     class Meta:
         model = models.ModuleLesson
         fields = ['id', 'module', 'title', 'description', 'objectives', 'objectives_list',
                   'content_type', 'file', 'duration_seconds', 'duration_formatted', 
                   'file_size_formatted', 'order', 'is_preview', 'is_locked',
+                  'required_access_level',
                   'downloadables', 'created_at', 'updated_at']
     
     def __init__(self, *args, **kwargs):
@@ -168,10 +180,23 @@ class StudentSerializer(serializers.ModelSerializer):
                 print(f"Method is - {request.method}")
                 self.Meta.depth = 2
 
-class StudentCourseEnrollSerializer(serializers.ModelSerializer):        
+class StudentCourseEnrollSerializer(serializers.ModelSerializer):
+        subscription_valid = serializers.SerializerMethodField()
+        progress_percent = serializers.IntegerField(read_only=True)
+        is_active = serializers.BooleanField(read_only=True)
+        
         class Meta:
             model=models.StudentCourseEnrollment
-            fields='__all__'
+            fields=['id', 'course', 'student', 'subscription', 'enrolled_time', 
+                    'is_active', 'completed_at', 'last_accessed', 'progress_percent',
+                    'subscription_valid']
+        
+        def get_subscription_valid(self, obj):
+            if not obj.subscription:
+                return {'valid': False, 'message': 'No subscription linked'}
+            valid, msg = obj.check_subscription_validity()
+            return {'valid': valid, 'message': msg}
+        
         def __init__(self, *args, **kwargs):
             super(StudentCourseEnrollSerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
@@ -184,13 +209,26 @@ class StudentCourseEnrollSerializer(serializers.ModelSerializer):
                 self.Meta.depth = 2
         
         def create(self, validated_data):
-            """Create enrollment and also create CourseProgress record"""
+            """Create enrollment with subscription validation and CourseProgress record"""
+            from .access_control import SubscriptionAccessControl
+            
+            student = validated_data.get('student')
+            course = validated_data.get('course')
+            
+            # Get active subscription for the student
+            subscription = SubscriptionAccessControl.get_active_subscription(student.id) if student else None
+            
+            # Link subscription to enrollment
+            if subscription:
+                validated_data['subscription'] = subscription
+            
             enrollment = super().create(validated_data)
             
-            # Create CourseProgress record for this enrollment
-            student = enrollment.student
-            course = enrollment.course
+            # Record course enrollment in subscription
+            if subscription:
+                subscription.record_course_enrollment()
             
+            # Create CourseProgress record for this enrollment
             # Calculate total lessons from modules
             total_lessons = 0
             for chapter in course.course_chapters.all():
@@ -717,40 +755,83 @@ class TeacherOverviewSerializer(serializers.Serializer):
 class SubscriptionPlanSerializer(serializers.ModelSerializer):
     features_list = serializers.SerializerMethodField()
     final_price = serializers.SerializerMethodField()
+    allowed_teachers_details = serializers.SerializerMethodField()
+    allowed_categories_details = serializers.SerializerMethodField()
+    allowed_teachers = serializers.SerializerMethodField()
     
     class Meta:
         model = models.SubscriptionPlan
         fields = ['id', 'name', 'description', 'duration', 'price', 'discount_price', 
-                  'max_courses', 'max_lessons', 'lessons_per_week', 'features', 
-                  'features_list', 'final_price', 'status', 'is_featured', 'created_at', 'updated_at']
-        read_only_fields = ['created_at', 'updated_at', 'features_list', 'final_price']
+                  'access_level', 'max_courses', 'max_lessons', 'lessons_per_week', 
+                  'lessons_per_day', 'features', 'features_list', 'final_price', 
+                  'status', 'is_featured', 'can_download',
+                  'can_access_live_sessions', 'priority_support',
+                  'allowed_teachers', 'allowed_teachers_details',
+                  'allowed_categories', 'allowed_categories_details',
+                  'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at', 'features_list', 'final_price',
+                            'allowed_teachers_details', 'allowed_categories_details', 'allowed_teachers']
+    
+    def validate(self, data):
+        """Validate and log validation errors"""
+        print('=' * 50)
+        print('SUBSCRIPTION PLAN VALIDATION')
+        print('=' * 50)
+        print(f'Data being validated: {data}')
+        return data
     
     def get_features_list(self, obj):
         return obj.get_features_list()
     
     def get_final_price(self, obj):
         return str(obj.get_final_price())
+    
+    def get_allowed_teachers(self, obj):
+        """Return full teacher details for allowed teachers"""
+        teachers = obj.allowed_teachers.all()
+        if not teachers.exists():
+            return []  # Empty means all teachers allowed
+        return [{'id': t.id, 'full_name': t.full_name, 'email': t.email} for t in teachers]
+    
+    def get_allowed_teachers_details(self, obj):
+        teachers = obj.allowed_teachers.all()
+        if not teachers.exists():
+            return []  # Empty means all teachers allowed
+        return [{'id': t.id, 'name': t.full_name} for t in teachers[:20]]
+    
+    def get_allowed_categories_details(self, obj):
+        categories = obj.allowed_categories.all()
+        if not categories.exists():
+            return []  # Empty means all categories allowed
+        return [{'id': c.id, 'title': c.title} for c in categories]
 
 
 class SubscriptionSerializer(serializers.ModelSerializer):
     plan_details = SubscriptionPlanSerializer(source='plan', read_only=True)
     student_details = serializers.SerializerMethodField()
+    assigned_teacher_details = serializers.SerializerMethodField()
     is_active_status = serializers.SerializerMethodField()
     days_remaining = serializers.SerializerMethodField()
-    can_access_course = serializers.SerializerMethodField()
-    can_access_lesson = serializers.SerializerMethodField()
+    can_access_course_status = serializers.SerializerMethodField()
+    can_access_lesson_status = serializers.SerializerMethodField()
+    usage_summary = serializers.SerializerMethodField()
     
     class Meta:
         model = models.Subscription
-        fields = ['id', 'student', 'student_details', 'plan', 'plan_details', 'status', 
+        fields = ['id', 'student', 'student_details', 'plan', 'plan_details', 
+                  'assigned_teacher', 'assigned_teacher_details', 'status', 
                   'price_paid', 'is_paid', 'payment_date', 'start_date', 'end_date', 
                   'activated_at', 'cancelled_at', 'courses_accessed', 'lessons_accessed', 
-                  'current_week_lessons', 'lessons_used_this_month', 'last_reset_date',
+                  'current_week_lessons', 'lessons_used_this_month', 'lessons_used_today',
+                  'last_reset_date', 'last_daily_reset', 'last_weekly_reset',
                   'auto_renew', 'is_active_status', 'days_remaining', 
-                  'can_access_course', 'can_access_lesson', 'created_at', 'updated_at']
+                  'can_access_course_status', 'can_access_lesson_status', 
+                  'usage_summary', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at', 'activated_at', 'cancelled_at']
     
     def get_student_details(self, obj):
+        if not obj.student:
+            return None
         return {
             'id': obj.student.id,
             'fullname': obj.student.fullname,
@@ -758,17 +839,32 @@ class SubscriptionSerializer(serializers.ModelSerializer):
             'profile_img': obj.student.profile_img.url if obj.student.profile_img else None
         }
     
+    def get_assigned_teacher_details(self, obj):
+        if not obj.assigned_teacher:
+            return None
+        return {
+            'id': obj.assigned_teacher.id,
+            'full_name': obj.assigned_teacher.full_name,
+            'email': obj.assigned_teacher.email,
+            'profile_img': obj.assigned_teacher.profile_img.url if obj.assigned_teacher.profile_img else None
+        }
+    
     def get_is_active_status(self, obj):
-        return obj.is_active()
+        return obj.is_active_and_paid()
     
     def get_days_remaining(self, obj):
         return obj.days_remaining()
     
-    def get_can_access_course(self, obj):
-        return obj.can_access_course()
+    def get_can_access_course_status(self, obj):
+        can_access, msg = obj.can_access_course()
+        return {'can_access': can_access, 'message': msg}
     
-    def get_can_access_lesson(self, obj):
-        return obj.can_access_lesson()
+    def get_can_access_lesson_status(self, obj):
+        can_access, msg = obj.can_access_lesson()
+        return {'can_access': can_access, 'message': msg}
+    
+    def get_usage_summary(self, obj):
+        return obj.get_usage_summary()
 
 
 class SubscriptionHistorySerializer(serializers.ModelSerializer):
@@ -781,3 +877,63 @@ class SubscriptionHistorySerializer(serializers.ModelSerializer):
                   'old_plan', 'old_plan_details', 'new_plan', 'new_plan_details', 
                   'notes', 'changed_by', 'created_at']
         read_only_fields = ['created_at']
+
+
+# ==================== AUDIT LOG SERIALIZERS ====================
+
+class UploadLogSerializer(serializers.ModelSerializer):
+    user_display = serializers.SerializerMethodField()
+    file_size_display = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = models.UploadLog
+        fields = ['id', 'teacher', 'student', 'admin', 'user_display', 'file_name', 'file_type', 
+                  'file_size', 'file_size_display', 'upload_type', 'content_type', 'object_id',
+                  'status', 'error_message', 'file_path', 'ip_address', 'created_at', 'completed_at']
+        read_only_fields = ['created_at', 'completed_at']
+    
+    def get_user_display(self, obj):
+        return obj.get_user_display()
+    
+    def get_file_size_display(self, obj):
+        """Convert bytes to human readable format"""
+        size = obj.file_size
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024:
+                return f"{size:.2f} {unit}"
+            size /= 1024
+        return f"{size:.2f} TB"
+
+
+class PaymentLogSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source='student.fullname', read_only=True)
+    subscription_plan_name = serializers.CharField(source='subscription_plan.name', read_only=True)
+    subscription_details = SubscriptionSerializer(source='subscription', read_only=True)
+    
+    class Meta:
+        model = models.PaymentLog
+        fields = ['id', 'student', 'student_name', 'subscription', 'subscription_plan', 
+                  'subscription_plan_name', 'subscription_details', 'transaction_id', 
+                  'payment_type', 'status', 'payment_method', 'amount', 'currency', 
+                  'tax_amount', 'discount_amount', 'final_amount', 'receipt_url', 
+                  'invoice_number', 'error_message', 'error_code', 'user_email', 
+                  'user_ip_address', 'created_at', 'completed_at']
+        read_only_fields = ['created_at', 'completed_at']
+
+
+class AccessLogSerializer(serializers.ModelSerializer):
+    user_display = serializers.SerializerMethodField()
+    course_name = serializers.CharField(source='course.title', read_only=True, allow_null=True)
+    lesson_name = serializers.CharField(source='lesson.title', read_only=True, allow_null=True)
+    student_name = serializers.CharField(source='student.fullname', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = models.AccessLog
+        fields = ['id', 'teacher', 'student', 'admin', 'user_display', 'access_type', 
+                  'course', 'course_name', 'lesson', 'lesson_name', 'subscription', 
+                  'was_allowed', 'denial_reason', 'duration_seconds', 'ip_address', 
+                  'student_name', 'created_at']
+        read_only_fields = ['created_at']
+    
+    def get_user_display(self, obj):
+        return obj.get_user_display()

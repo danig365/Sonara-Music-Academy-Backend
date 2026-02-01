@@ -49,6 +49,13 @@ class CourseCategory(models.Model):
         return self.title
 
 class Course(models.Model):
+    ACCESS_LEVEL_CHOICES = [
+        ('free', 'Free'),
+        ('basic', 'Basic'),
+        ('standard', 'Standard'),
+        ('premium', 'Premium'),
+    ]
+    
     category=models.ForeignKey(CourseCategory,on_delete=models.CASCADE, related_name='category_courses')
     teacher=models.ForeignKey(Teacher,on_delete=models.CASCADE, related_name='teacher_courses')
     title=models.CharField(max_length=150)
@@ -56,6 +63,11 @@ class Course(models.Model):
     featured_img=models.ImageField(upload_to='course_imgs/',null=True)
     techs=models.TextField(null=True)
     course_views=models.BigIntegerField(default=0)
+    
+    # Access control fields
+    required_access_level = models.CharField(max_length=20, choices=ACCESS_LEVEL_CHOICES, default='free',
+                                              help_text="Minimum subscription level required to access this course")
+    is_featured = models.BooleanField(default=False, help_text="Feature this course on homepage")
 
     class Meta:
         verbose_name_plural="3. Courses"
@@ -75,6 +87,18 @@ class Course(models.Model):
     def course_rating(self):
         course_rating=CourseRating.objects.filter(course=self).aggregate(avg_rating=models.Avg('rating'))
         return course_rating['avg_rating']
+    
+    def get_required_access_rank(self):
+        """Get numeric rank for access level comparison"""
+        ranks = {'free': 0, 'basic': 1, 'standard': 2, 'premium': 3}
+        return ranks.get(self.required_access_level, 0)
+    
+    def can_be_accessed_by_level(self, access_level):
+        """Check if a given access level can access this course"""
+        ranks = {'free': 0, 'basic': 1, 'standard': 2, 'premium': 3, 'unlimited': 4}
+        required_rank = self.get_required_access_rank()
+        user_rank = ranks.get(access_level, 0)
+        return user_rank >= required_rank
     
     def __str__(self) :
         return self.title
@@ -118,6 +142,12 @@ class ModuleLesson(models.Model):
     order = models.PositiveIntegerField(default=0)
     is_preview = models.BooleanField(default=False, help_text="Allow non-enrolled users to preview this lesson")
     is_locked = models.BooleanField(default=True, help_text="Lesson locked until previous lessons completed")
+    required_access_level = models.CharField(max_length=20, choices=[
+        ('free', 'Free'),
+        ('basic', 'Basic'),
+        ('standard', 'Standard'),
+        ('premium', 'Premium'),
+    ], default='free', help_text="Minimum subscription level required")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -127,6 +157,18 @@ class ModuleLesson(models.Model):
 
     def __str__(self):
         return f"{self.module.title} - {self.title}"
+    
+    def get_required_access_rank(self):
+        """Get numeric rank for access level comparison"""
+        ranks = {'free': 0, 'basic': 1, 'standard': 2, 'premium': 3}
+        return ranks.get(self.required_access_level, 0)
+    
+    def can_be_accessed_by_level(self, access_level):
+        """Check if a given access level can access this lesson"""
+        ranks = {'free': 0, 'basic': 1, 'standard': 2, 'premium': 3, 'unlimited': 4}
+        required_rank = self.get_required_access_rank()
+        user_rank = ranks.get(access_level, 0)
+        return user_rank >= required_rank
 
     @property
     def duration_formatted(self):
@@ -302,15 +344,71 @@ class Student(models.Model):
         verbose_name_plural="5. Students"
 
 class StudentCourseEnrollment(models.Model):
+    """
+    Track student course enrollments with subscription linkage.
+    Ensures enrollment is tied to valid subscription for access control.
+    """
     course=models.ForeignKey(Course,null=True,on_delete=models.CASCADE,related_name='enrolled_courses')
     student=models.ForeignKey(Student,null=True,on_delete=models.CASCADE,related_name='enrolled_student')
+    subscription=models.ForeignKey('Subscription', null=True, blank=True, on_delete=models.SET_NULL, 
+                                    related_name='enrollments',
+                                    help_text="Subscription used for this enrollment")
     enrolled_time=models.DateTimeField(auto_now_add=True)
+    
+    # Access tracking
+    is_active=models.BooleanField(default=True, help_text="Whether enrollment is currently active")
+    completed_at=models.DateTimeField(null=True, blank=True, help_text="When course was completed")
+    last_accessed=models.DateTimeField(null=True, blank=True, help_text="Last time student accessed the course")
+    progress_percent=models.IntegerField(default=0, help_text="Overall course completion percentage")
 
     class Meta:
          verbose_name_plural="6. Enrolled Courses"
+         unique_together = ['course', 'student']
 
     def __str__(self) :
         return f"{self.course}-{self.student}"
+    
+    def update_progress(self):
+        """Calculate and update progress percentage based on completed lessons"""
+        if not self.course:
+            return 0
+        
+        total_lessons = ModuleLesson.objects.filter(module__course=self.course).count()
+        if total_lessons == 0:
+            return 0
+        
+        completed_lessons = ModuleLessonProgress.objects.filter(
+            student=self.student,
+            lesson__module__course=self.course,
+            is_completed=True
+        ).count()
+        
+        self.progress_percent = int((completed_lessons / total_lessons) * 100)
+        self.save(update_fields=['progress_percent'])
+        return self.progress_percent
+    
+    def check_subscription_validity(self):
+        """Check if the associated subscription is still valid for this enrollment"""
+        if not self.subscription:
+            return False, "No subscription linked to enrollment"
+        
+        if not self.subscription.is_active_and_paid():
+            return False, "Subscription is no longer active"
+        
+        return True, "Subscription valid"
+    
+    def mark_completed(self):
+        """Mark the course as completed"""
+        from django.utils import timezone
+        self.completed_at = timezone.now()
+        self.progress_percent = 100
+        self.save(update_fields=['completed_at', 'progress_percent'])
+    
+    def record_access(self):
+        """Record course access time"""
+        from django.utils import timezone
+        self.last_accessed = timezone.now()
+        self.save(update_fields=['last_accessed'])
 
 class CourseRating(models.Model):
     course=models.ForeignKey(Course,on_delete=models.CASCADE,null=True)
@@ -1074,7 +1172,7 @@ class TeacherDashboardMetrics(models.Model):
 # ==================== SUBSCRIPTIONS MANAGEMENT ====================
 
 class SubscriptionPlan(models.Model):
-    """Subscription plan definitions"""
+    """Subscription plan definitions with access control"""
     DURATION_CHOICES = [
         ('monthly', 'Monthly'),
         ('quarterly', 'Quarterly'),
@@ -1088,14 +1186,43 @@ class SubscriptionPlan(models.Model):
         ('archived', 'Archived'),
     ]
     
+    ACCESS_LEVEL_CHOICES = [
+        ('free', 'Free'),
+        ('basic', 'Basic'),
+        ('standard', 'Standard'),
+        ('premium', 'Premium'),
+        ('unlimited', 'Unlimited'),
+    ]
+    
     name = models.CharField(max_length=100)
     description = models.TextField(null=True, blank=True)
     duration = models.CharField(max_length=20, choices=DURATION_CHOICES, default='monthly')
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     discount_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    
+    # Access Level - defines the tier of access
+    access_level = models.CharField(max_length=20, choices=ACCESS_LEVEL_CHOICES, default='basic',
+                                     help_text="Access tier: free < basic < standard < premium < unlimited")
+    
+    # Course and Lesson limits
     max_courses = models.IntegerField(default=10, help_text="Maximum courses students can enroll in")
     max_lessons = models.IntegerField(default=100, help_text="Maximum lessons they can access")
     lessons_per_week = models.IntegerField(null=True, blank=True, help_text="Max lessons per week (None = unlimited)")
+    lessons_per_day = models.IntegerField(null=True, blank=True, help_text="Max lessons per day (None = unlimited)")
+    
+    # Teacher access - which teachers' courses are included in this plan
+    allowed_teachers = models.ManyToManyField(Teacher, blank=True, related_name='subscription_plans',
+                                               help_text="Teachers whose courses are accessible with this plan. Empty = all teachers.")
+    
+    # Category access - which course categories are included
+    allowed_categories = models.ManyToManyField(CourseCategory, blank=True, related_name='subscription_plans',
+                                                 help_text="Categories accessible with this plan. Empty = all categories.")
+    
+    # Content access controls
+    can_download = models.BooleanField(default=False, help_text="Can download lesson materials")
+    can_access_live_sessions = models.BooleanField(default=False, help_text="Can access live teaching sessions")
+    priority_support = models.BooleanField(default=False, help_text="Has priority customer support")
+    
     features = models.TextField(null=True, blank=True, help_text="Comma-separated features")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
     is_featured = models.BooleanField(default=False)
@@ -1107,7 +1234,7 @@ class SubscriptionPlan(models.Model):
         ordering = ['price']
 
     def __str__(self):
-        return f"{self.name} ({self.duration})"
+        return f"{self.name} ({self.duration}) - {self.access_level}"
 
     def get_features_list(self):
         """Return features as a list"""
@@ -1118,10 +1245,37 @@ class SubscriptionPlan(models.Model):
     def get_final_price(self):
         """Get final price (discount if available)"""
         return self.discount_price if self.discount_price else self.price
+    
+    def get_allowed_teacher_ids(self):
+        """Return list of allowed teacher IDs, empty list means all teachers"""
+        return list(self.allowed_teachers.values_list('id', flat=True))
+    
+    def get_allowed_category_ids(self):
+        """Return list of allowed category IDs, empty list means all categories"""
+        return list(self.allowed_categories.values_list('id', flat=True))
+    
+    def is_teacher_allowed(self, teacher_id):
+        """Check if a specific teacher is allowed in this plan"""
+        allowed_ids = self.get_allowed_teacher_ids()
+        if not allowed_ids:  # Empty means all teachers allowed
+            return True
+        return teacher_id in allowed_ids
+    
+    def is_category_allowed(self, category_id):
+        """Check if a specific category is allowed in this plan"""
+        allowed_ids = self.get_allowed_category_ids()
+        if not allowed_ids:  # Empty means all categories allowed
+            return True
+        return category_id in allowed_ids
+    
+    def get_access_level_rank(self):
+        """Get numeric rank for access level comparison"""
+        ranks = {'free': 0, 'basic': 1, 'standard': 2, 'premium': 3, 'unlimited': 4}
+        return ranks.get(self.access_level, 0)
 
 
 class Subscription(models.Model):
-    """Student subscription records"""
+    """Student subscription records with access control"""
     STATUS_CHOICES = [
         ('active', 'Active'),
         ('pending', 'Pending'),
@@ -1134,6 +1288,11 @@ class Subscription(models.Model):
     plan = models.ForeignKey(SubscriptionPlan, on_delete=models.SET_NULL, null=True, blank=True, related_name='subscriptions')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     
+    # Assigned Teacher - specific teacher assigned to this student's subscription
+    assigned_teacher = models.ForeignKey(Teacher, on_delete=models.SET_NULL, null=True, blank=True, 
+                                          related_name='assigned_subscriptions',
+                                          help_text="Primary teacher assigned to this subscription")
+    
     # Pricing and payment
     price_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     is_paid = models.BooleanField(default=False)
@@ -1143,6 +1302,8 @@ class Subscription(models.Model):
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
     last_reset_date = models.DateField(null=True, blank=True)
+    last_daily_reset = models.DateField(null=True, blank=True, help_text="Last date daily lesson count was reset")
+    last_weekly_reset = models.DateField(null=True, blank=True, help_text="Last date weekly lesson count was reset")
     activated_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
     
@@ -1150,6 +1311,7 @@ class Subscription(models.Model):
     courses_accessed = models.IntegerField(default=0)
     lessons_accessed = models.IntegerField(default=0)
     lessons_used_this_month = models.IntegerField(default=0)
+    lessons_used_today = models.IntegerField(default=0, help_text="Lessons accessed today")
     current_week_lessons = models.IntegerField(default=0, help_text="Lessons accessed in current week")
     auto_renew = models.BooleanField(default=True)
     
@@ -1163,43 +1325,135 @@ class Subscription(models.Model):
 
     def __str__(self):
         plan_name = self.plan.name if self.plan else "No Plan"
-        return f"{self.student.fullname} - {plan_name} ({self.status})"
+        student_name = self.student.fullname if self.student else "No Student"
+        return f"{student_name} - {plan_name} ({self.status})"
 
-    def is_active(self):
-        """Check if subscription is currently active"""
+    def is_active_and_paid(self):
+        """Check if subscription is currently active AND paid"""
         from django.utils import timezone
         today = timezone.now().date()
+        if not self.start_date or not self.end_date:
+            return False
         return (self.status == 'active' and 
+                self.is_paid and
                 self.start_date <= today <= self.end_date)
+    
+    def is_active(self):
+        """Check if subscription is currently active (legacy compatibility)"""
+        return self.is_active_and_paid()
 
     def days_remaining(self):
         """Calculate remaining days"""
         from django.utils import timezone
-        if self.is_active():
+        if self.is_active_and_paid():
             return (self.end_date - timezone.now().date()).days
         return 0
+    
+    def reset_daily_limits(self):
+        """Reset daily lesson count if needed"""
+        from django.utils import timezone
+        today = timezone.now().date()
+        if self.last_daily_reset != today:
+            self.lessons_used_today = 0
+            self.last_daily_reset = today
+            self.save(update_fields=['lessons_used_today', 'last_daily_reset'])
+    
+    def reset_weekly_limits(self):
+        """Reset weekly lesson count if needed (resets on Monday)"""
+        from django.utils import timezone
+        today = timezone.now().date()
+        # Get the Monday of the current week
+        days_since_monday = today.weekday()
+        current_monday = today - timezone.timedelta(days=days_since_monday)
+        
+        if not self.last_weekly_reset or self.last_weekly_reset < current_monday:
+            self.current_week_lessons = 0
+            self.last_weekly_reset = today
+            self.save(update_fields=['current_week_lessons', 'last_weekly_reset'])
+    
+    def check_and_reset_limits(self):
+        """Check and reset daily/weekly limits if needed"""
+        self.reset_daily_limits()
+        self.reset_weekly_limits()
 
-    def can_access_course(self):
-        """Check if student can access more courses"""
-        if not self.plan or not self.is_active():
-            return False
-        return self.courses_accessed < self.plan.max_courses
+    def can_access_course(self, course=None):
+        """Check if student can access/enroll in a course"""
+        if not self.plan or not self.is_active_and_paid():
+            return False, "No active subscription"
+        
+        # Check if courses limit reached
+        if self.courses_accessed >= self.plan.max_courses:
+            return False, f"Course limit reached - Your plan allows {self.plan.max_courses} courses"
+        
+        if course:
+            # Check if course's teacher is allowed
+            if not self.plan.is_teacher_allowed(course.teacher_id):
+                allowed_teachers = self.plan.get_allowed_teacher_ids()
+                if allowed_teachers:
+                    teacher_names = list(self.plan.allowed_teachers.values_list('full_name', flat=True))
+                    return False, f"This course is taught by {course.teacher.full_name}, but your plan only allows courses from: {', '.join(teacher_names)}"
+                return False, "This teacher's courses are not included in your plan"
+            
+            # Check if course's category is allowed
+            if not self.plan.is_category_allowed(course.category_id):
+                allowed_cats = self.plan.get_allowed_category_ids()
+                if allowed_cats:
+                    cat_names = list(self.plan.allowed_categories.values_list('title', flat=True))
+                    return False, f"This course is in '{course.category.title}' category, but your plan includes: {', '.join(cat_names)}"
+                return False, "This category is not included in your plan"
+            
+            # If assigned teacher is set, only allow their courses
+            if self.assigned_teacher and course.teacher_id != self.assigned_teacher_id:
+                return False, f"You can only access courses from your assigned teacher: {self.assigned_teacher.full_name}"
+        
+        return True, "Access granted"
 
-    def can_access_lesson(self):
-        """Check if student can access more lessons"""
-        if not self.plan or not self.is_active():
-            return False
+    def can_access_lesson(self, lesson=None):
+        """Check if student can access a lesson"""
+        if not self.plan or not self.is_active_and_paid():
+            return False, "No active subscription"
+        
+        # Reset limits if needed
+        self.check_and_reset_limits()
         
         # Check total lessons limit
         if self.lessons_accessed >= self.plan.max_lessons:
-            return False
+            return False, f"Total lesson limit reached ({self.plan.max_lessons} lessons)"
+        
+        # Check daily limit if set
+        if self.plan.lessons_per_day:
+            if self.lessons_used_today >= self.plan.lessons_per_day:
+                return False, f"Daily lesson limit reached ({self.plan.lessons_per_day} lessons/day)"
         
         # Check weekly limit if set
         if self.plan.lessons_per_week:
             if self.current_week_lessons >= self.plan.lessons_per_week:
-                return False
+                return False, f"Weekly lesson limit reached ({self.plan.lessons_per_week} lessons/week)"
         
-        return True
+        if lesson:
+            # Check if lesson's course belongs to allowed teacher/category
+            if hasattr(lesson, 'module') and lesson.module and hasattr(lesson.module, 'course'):
+                course = lesson.module.course
+                course_access, msg = self.can_access_course(course)
+                if not course_access:
+                    return False, msg
+        
+        return True, "Access granted"
+    
+    def record_lesson_access(self):
+        """Record that a lesson was accessed"""
+        self.check_and_reset_limits()
+        self.lessons_accessed += 1
+        self.lessons_used_today += 1
+        self.current_week_lessons += 1
+        self.lessons_used_this_month += 1
+        self.save(update_fields=['lessons_accessed', 'lessons_used_today', 
+                                  'current_week_lessons', 'lessons_used_this_month', 'updated_at'])
+    
+    def record_course_enrollment(self):
+        """Record that a course was enrolled"""
+        self.courses_accessed += 1
+        self.save(update_fields=['courses_accessed', 'updated_at'])
 
     def activate(self):
         """Activate the subscription"""
@@ -1209,14 +1463,140 @@ class Subscription(models.Model):
             self.activated_at = timezone.now()
             self.is_paid = True
             self.payment_date = timezone.now()
+            self.last_daily_reset = timezone.now().date()
+            self.last_weekly_reset = timezone.now().date()
             self.save()
+            
+            # Log the activation
+            SubscriptionHistory.objects.create(
+                subscription=self,
+                action='activated',
+                old_status='pending',
+                new_status='active',
+                notes='Subscription activated after payment confirmation'
+            )
 
     def cancel(self):
         """Cancel the subscription"""
         from django.utils import timezone
+        old_status = self.status
         self.status = 'cancelled'
         self.cancelled_at = timezone.now()
         self.save()
+        
+        # Log the cancellation
+        SubscriptionHistory.objects.create(
+            subscription=self,
+            action='cancelled',
+            old_status=old_status,
+            new_status='cancelled',
+            notes='Subscription cancelled'
+        )
+    
+    def expire(self):
+        """Mark subscription as expired"""
+        from django.utils import timezone
+        old_status = self.status
+        self.status = 'expired'
+        self.save()
+        
+        # Log the expiration
+        SubscriptionHistory.objects.create(
+            subscription=self,
+            action='cancelled',  # Using cancelled action for expiry
+            old_status=old_status,
+            new_status='expired',
+            notes='Subscription expired automatically'
+        )
+    
+    def upgrade_plan(self, new_plan, price_difference=0):
+        """Upgrade to a new plan"""
+        from django.utils import timezone
+        old_plan = self.plan
+        self.plan = new_plan
+        self.price_paid += price_difference
+        self.save()
+        
+        # Log the upgrade
+        SubscriptionHistory.objects.create(
+            subscription=self,
+            action='upgraded',
+            old_plan=old_plan,
+            new_plan=new_plan,
+            notes=f'Upgraded from {old_plan.name if old_plan else "None"} to {new_plan.name}'
+        )
+    
+    def downgrade_plan(self, new_plan):
+        """Downgrade to a lower plan (takes effect at renewal)"""
+        from django.utils import timezone
+        old_plan = self.plan
+        self.plan = new_plan
+        self.save()
+        
+        # Log the downgrade
+        SubscriptionHistory.objects.create(
+            subscription=self,
+            action='downgraded',
+            old_plan=old_plan,
+            new_plan=new_plan,
+            notes=f'Downgraded from {old_plan.name if old_plan else "None"} to {new_plan.name}'
+        )
+    
+    def get_accessible_teachers(self):
+        """Get list of teachers whose courses this subscription can access"""
+        if not self.plan:
+            return Teacher.objects.none()
+        
+        # If assigned teacher is set, only return that teacher
+        if self.assigned_teacher:
+            return Teacher.objects.filter(id=self.assigned_teacher_id)
+        
+        # Otherwise, return teachers allowed by the plan
+        allowed_ids = self.plan.get_allowed_teacher_ids()
+        if not allowed_ids:  # Empty means all teachers
+            return Teacher.objects.all()
+        return Teacher.objects.filter(id__in=allowed_ids)
+    
+    def get_accessible_courses(self):
+        """Get queryset of courses this subscription can access"""
+        if not self.plan:
+            return Course.objects.none()
+        
+        courses = Course.objects.all()
+        
+        # Filter by assigned teacher if set
+        if self.assigned_teacher:
+            courses = courses.filter(teacher=self.assigned_teacher)
+        else:
+            # Filter by allowed teachers from plan
+            allowed_teacher_ids = self.plan.get_allowed_teacher_ids()
+            if allowed_teacher_ids:
+                courses = courses.filter(teacher_id__in=allowed_teacher_ids)
+        
+        # Filter by allowed categories
+        allowed_category_ids = self.plan.get_allowed_category_ids()
+        if allowed_category_ids:
+            courses = courses.filter(category_id__in=allowed_category_ids)
+        
+        return courses
+    
+    def get_usage_summary(self):
+        """Get a summary of subscription usage"""
+        return {
+            'courses_used': self.courses_accessed,
+            'courses_limit': self.plan.max_courses if self.plan else 0,
+            'courses_remaining': (self.plan.max_courses - self.courses_accessed) if self.plan else 0,
+            'lessons_used': self.lessons_accessed,
+            'lessons_limit': self.plan.max_lessons if self.plan else 0,
+            'lessons_remaining': (self.plan.max_lessons - self.lessons_accessed) if self.plan else 0,
+            'lessons_today': self.lessons_used_today,
+            'lessons_per_day': self.plan.lessons_per_day if self.plan else None,
+            'lessons_this_week': self.current_week_lessons,
+            'lessons_per_week': self.plan.lessons_per_week if self.plan else None,
+            'days_remaining': self.days_remaining(),
+            'is_active': self.is_active_and_paid(),
+            'access_level': self.plan.access_level if self.plan else 'none',
+        }
 
 
 class SubscriptionHistory(models.Model):
@@ -1248,3 +1628,217 @@ class SubscriptionHistory(models.Model):
 
     def __str__(self):
         return f"{self.subscription.student.fullname} - {self.action}"
+
+
+# ==================== AUDIT LOGGING MODELS ====================
+
+class UploadLog(models.Model):
+    """Track file uploads throughout the system"""
+    UPLOAD_TYPE_CHOICES = [
+        ('lesson_content', 'Lesson Content'),
+        ('student_submission', 'Student Submission'),
+        ('profile_image', 'Profile Image'),
+        ('course_image', 'Course Image'),
+        ('study_material', 'Study Material'),
+        ('downloadable_resource', 'Downloadable Resource'),
+        ('other', 'Other'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('success', 'Success'),
+        ('failed', 'Failed'),
+        ('pending', 'Pending'),
+    ]
+    
+    # User who uploaded
+    teacher = models.ForeignKey(Teacher, on_delete=models.SET_NULL, null=True, blank=True, related_name='upload_logs')
+    student = models.ForeignKey(Student, on_delete=models.SET_NULL, null=True, blank=True, related_name='upload_logs')
+    admin = models.ForeignKey(Admin, on_delete=models.SET_NULL, null=True, blank=True, related_name='upload_logs')
+    
+    # File information
+    file_name = models.CharField(max_length=255)
+    file_type = models.CharField(max_length=50)  # e.g., pdf, mp4, jpg
+    file_size = models.BigIntegerField()  # Size in bytes
+    upload_type = models.CharField(max_length=30, choices=UPLOAD_TYPE_CHOICES)
+    
+    # Related object (generic)
+    content_type = models.CharField(max_length=100, null=True, blank=True)  # e.g., 'lesson', 'course'
+    object_id = models.IntegerField(null=True, blank=True)  # ID of related object
+    
+    # Upload details
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    error_message = models.TextField(null=True, blank=True)
+    file_path = models.CharField(max_length=500, null=True, blank=True)
+    
+    # Network info
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(null=True, blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        verbose_name_plural = "53. Upload Logs"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['created_at']),
+            models.Index(fields=['upload_type']),
+            models.Index(fields=['status']),
+        ]
+    
+    def __str__(self):
+        user = self.teacher or self.student or self.admin
+        return f"{user} - {self.file_name} - {self.status}"
+    
+    def get_user_display(self):
+        """Get the user who uploaded the file"""
+        if self.teacher:
+            return f"{self.teacher.full_name} (Teacher)"
+        elif self.student:
+            return f"{self.student.fullname} (Student)"
+        elif self.admin:
+            return f"{self.admin.username} (Admin)"
+        return "Unknown User"
+
+
+class PaymentLog(models.Model):
+    """Track payment and subscription transactions"""
+    PAYMENT_TYPE_CHOICES = [
+        ('subscription_purchase', 'Subscription Purchase'),
+        ('plan_upgrade', 'Plan Upgrade'),
+        ('plan_downgrade', 'Plan Downgrade'),
+        ('renewal', 'Renewal'),
+        ('refund', 'Refund'),
+        ('failed_attempt', 'Failed Attempt'),
+    ]
+    
+    PAYMENT_STATUS_CHOICES = [
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+        ('pending', 'Pending'),
+        ('refunded', 'Refunded'),
+        ('cancelled', 'Cancelled'),
+    ]
+    
+    PAYMENT_METHOD_CHOICES = [
+        ('stripe', 'Stripe'),
+        ('paypal', 'PayPal'),
+        ('credit_card', 'Credit Card'),
+        ('debit_card', 'Debit Card'),
+        ('wallet', 'Wallet'),
+        ('cash', 'Cash'),
+        ('bank_transfer', 'Bank Transfer'),
+        ('other', 'Other'),
+    ]
+    
+    # Student information
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='payment_logs')
+    subscription = models.ForeignKey(Subscription, on_delete=models.SET_NULL, null=True, blank=True, related_name='payment_logs')
+    subscription_plan = models.ForeignKey(SubscriptionPlan, on_delete=models.SET_NULL, null=True, blank=True, related_name='payment_logs')
+    
+    # Payment information
+    transaction_id = models.CharField(max_length=255, unique=True)
+    payment_type = models.CharField(max_length=30, choices=PAYMENT_TYPE_CHOICES)
+    status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES)
+    payment_method = models.CharField(max_length=30, choices=PAYMENT_METHOD_CHOICES, null=True, blank=True)
+    
+    # Amount details
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    currency = models.CharField(max_length=10, default='INR')
+    tax_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    final_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    # Payment gateway details
+    gateway_response = models.JSONField(null=True, blank=True)  # Response from Stripe/PayPal
+    receipt_url = models.URLField(null=True, blank=True)
+    invoice_number = models.CharField(max_length=100, null=True, blank=True)
+    
+    # Error tracking
+    error_message = models.TextField(null=True, blank=True)
+    error_code = models.CharField(max_length=100, null=True, blank=True)
+    
+    # User details at time of payment
+    user_email = models.EmailField(null=True, blank=True)
+    user_ip_address = models.GenericIPAddressField(null=True, blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        verbose_name_plural = "54. Payment Logs"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['created_at']),
+            models.Index(fields=['status']),
+            models.Index(fields=['payment_type']),
+            models.Index(fields=['transaction_id']),
+        ]
+    
+    def __str__(self):
+        return f"{self.student.fullname} - {self.payment_type} - {self.amount} {self.currency} - {self.status}"
+
+
+class AccessLog(models.Model):
+    """Track user access to courses and lessons"""
+    ACCESS_TYPE_CHOICES = [
+        ('course_view', 'Course View'),
+        ('lesson_view', 'Lesson View'),
+        ('course_enroll', 'Course Enrollment'),
+        ('course_unenroll', 'Course Unenrollment'),
+        ('download_material', 'Download Material'),
+        ('lesson_complete', 'Lesson Complete'),
+    ]
+    
+    # User information
+    teacher = models.ForeignKey(Teacher, on_delete=models.SET_NULL, null=True, blank=True, related_name='access_logs_teacher')
+    student = models.ForeignKey(Student, on_delete=models.SET_NULL, null=True, blank=True, related_name='access_logs_student')
+    admin = models.ForeignKey(Admin, on_delete=models.SET_NULL, null=True, blank=True, related_name='access_logs_admin')
+    
+    # Access details
+    access_type = models.CharField(max_length=30, choices=ACCESS_TYPE_CHOICES)
+    
+    # Related objects
+    course = models.ForeignKey(Course, on_delete=models.SET_NULL, null=True, blank=True, related_name='access_logs')
+    lesson = models.ForeignKey(ModuleLesson, on_delete=models.SET_NULL, null=True, blank=True, related_name='access_logs')
+    
+    # Subscription context
+    subscription = models.ForeignKey(Subscription, on_delete=models.SET_NULL, null=True, blank=True, related_name='access_logs')
+    
+    # Access control
+    was_allowed = models.BooleanField(default=True)
+    denial_reason = models.TextField(null=True, blank=True)
+    
+    # Session info
+    duration_seconds = models.IntegerField(null=True, blank=True)  # How long user spent
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(null=True, blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        verbose_name_plural = "55. Access Logs"
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['created_at']),
+            models.Index(fields=['access_type']),
+            models.Index(fields=['was_allowed']),
+        ]
+    
+    def __str__(self):
+        user = self.teacher or self.student or self.admin
+        resource = self.course or self.lesson or "Unknown"
+        return f"{user} - {self.access_type} - {resource}"
+    
+    def get_user_display(self):
+        """Get the user who accessed the resource"""
+        if self.teacher:
+            return f"{self.teacher.full_name} (Teacher)"
+        elif self.student:
+            return f"{self.student.fullname} (Student)"
+        elif self.admin:
+            return f"{self.admin.username} (Admin)"
+        return "Unknown User"
