@@ -23,8 +23,8 @@ class Command(BaseCommand):
             # 1. Create System Settings
             settings, created = SystemSettings.objects.get_or_create(
                 defaults={
-                    'site_name': 'EduLearning',
-                    'contact_email': 'support@edulearning.com',
+                    'site_name': 'Sonara Music Academy',
+                    'contact_email': 'support@sonaramusicacademy.com',
                     'contact_phone': '+91 9372575530',
                     'address': 'K.T Marg Road, Vasai Road, Maharashtra, India',
                     'maintenance_mode': False,
@@ -37,7 +37,7 @@ class Command(BaseCommand):
 
             # 2. Create Super Admin
             admin, created = Admin.objects.get_or_create(
-                email='admin@edulearning.com',
+                email='admin@sonaramusicacademy.com',
                 defaults={
                     'full_name': 'Super Admin',
                     'password': 'admin123',

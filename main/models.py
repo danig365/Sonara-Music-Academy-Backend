@@ -589,10 +589,10 @@ class ActivityLog(models.Model):
 
 
 class SystemSettings(models.Model):
-    site_name = models.CharField(max_length=200, default='EduLearning')
+    site_name = models.CharField(max_length=200, default='Sonara Music Academy')
     site_logo = models.ImageField(upload_to='system/', null=True, blank=True)
     favicon = models.ImageField(upload_to='system/', null=True, blank=True)
-    contact_email = models.EmailField(default='admin@edulearning.com')
+    contact_email = models.EmailField(default='admin@sonaramusicacademy.com')
     contact_phone = models.CharField(max_length=20, null=True, blank=True)
     address = models.TextField(null=True, blank=True)
     maintenance_mode = models.BooleanField(default=False)

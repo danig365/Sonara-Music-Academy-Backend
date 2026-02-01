@@ -1,5 +1,5 @@
 """
-Access Control Module for EduLearning Platform
+Access Control Module for Sonara Music Academy
 
 This module provides comprehensive subscription-based access control functionality.
 It enforces access rules at the backend level for:

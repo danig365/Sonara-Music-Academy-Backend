@@ -77,7 +77,7 @@ def log_payment(student_id, plan_id):
         'discount_amount': float(discount),
         'final_amount': float(final_amount),
         'currency': 'INR',
-        'user_email': f'student_{student_id}@edulearning.com',
+        'user_email': f'student_{student_id}@sonaramusicacademy.com',
         'user_ip_address': f'192.168.{random.randint(1, 255)}.{random.randint(1, 255)}',
         'receipt_url': f'https://receipts.example.com/{random.randint(100000, 999999)}',
         'invoice_number': f'INV-{datetime.now().strftime("%Y%m%d")}-{random.randint(1000, 9999)}',
