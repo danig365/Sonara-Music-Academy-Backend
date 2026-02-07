@@ -39,7 +39,15 @@ def teacher_login(request):
     except models.Teacher.DoesNotExist:
         teacherData=None
     if teacherData:
-        return JsonResponse({'bool':True,'teacher_id':teacherData.id})
+        return JsonResponse({
+            'bool': True,
+            'teacher_id': teacherData.id,
+            'teacher_name': teacherData.full_name,
+            'teacher_email': teacherData.email,
+            'teacher_qualification': teacherData.qualification,
+            'teacher_mobile': teacherData.mobile_no,
+            'teacher_profile_img': teacherData.profile_img.url if teacherData.profile_img else None
+        })
     else:
         return JsonResponse({'bool':False})
 

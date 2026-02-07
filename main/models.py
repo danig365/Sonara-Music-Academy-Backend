@@ -137,11 +137,12 @@ class ModuleLesson(models.Model):
     description = models.TextField(blank=True, null=True)
     objectives = models.TextField(blank=True, null=True, help_text="What students will learn in this lesson (one per line)")
     content_type = models.CharField(max_length=20, choices=CONTENT_TYPE_CHOICES, default='video')
-    file = models.FileField(upload_to='lesson_content/')
+    file = models.FileField(upload_to='lesson_content/', blank=True, null=True, max_length=500)
     duration_seconds = models.IntegerField(default=0)  # For video/audio
     order = models.PositiveIntegerField(default=0)
     is_preview = models.BooleanField(default=False, help_text="Allow non-enrolled users to preview this lesson")
     is_locked = models.BooleanField(default=True, help_text="Lesson locked until previous lessons completed")
+    is_premium = models.BooleanField(default=False, help_text="Mark as premium content")
     required_access_level = models.CharField(max_length=20, choices=[
         ('free', 'Free'),
         ('basic', 'Basic'),

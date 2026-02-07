@@ -108,7 +108,7 @@ class ModuleLessonSerializer(serializers.ModelSerializer):
         model = models.ModuleLesson
         fields = ['id', 'module', 'title', 'description', 'objectives', 'objectives_list',
                   'content_type', 'file', 'duration_seconds', 'duration_formatted', 
-                  'file_size_formatted', 'order', 'is_preview', 'is_locked',
+                  'file_size_formatted', 'order', 'is_preview', 'is_locked', 'is_premium',
                   'required_access_level',
                   'downloadables', 'created_at', 'updated_at']
     
