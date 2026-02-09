@@ -4,18 +4,70 @@ from django.contrib.flatpages.models import FlatPage
 
 
 class TeacherSerializer(serializers.ModelSerializer):
+    teacher_courses = serializers.SerializerMethodField(read_only=True)
+    skill_list = serializers.SerializerMethodField(read_only=True)
+    total_teacher_course = serializers.SerializerMethodField(read_only=True)
+    
     class Meta:
         model=models.Teacher
         fields=['id','full_name','email','password','qualification','mobile_no','skills','profile_img','teacher_courses','skill_list','total_teacher_course','face_url','insta_url','twit_url','web_url','you_url']
+        extra_kwargs = {
+            'password': {'required': False, 'allow_blank': True},
+            'skills': {'required': False, 'allow_blank': True},
+            'face_url': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'insta_url': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'twit_url': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'web_url': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'you_url': {'required': False, 'allow_blank': True, 'allow_null': True},
+            'profile_img': {'required': False},
+        }
+    
+    def get_teacher_courses(self, obj):
+        from . import models
+        return obj.teacher_courses.all().count()
+    
+    def get_skill_list(self, obj):
+        if obj.skills:
+            return [s.strip() for s in obj.skills.split(',')]
+        return []
+    
+    def get_total_teacher_course(self, obj):
+        return obj.total_teacher_course()
+    
+    def validate_face_url(self, value):
+        if value == '':
+            return None
+        return value
+    
+    def validate_insta_url(self, value):
+        if value == '':
+            return None
+        return value
+    
+    def validate_twit_url(self, value):
+        if value == '':
+            return None
+        return value
+    
+    def validate_web_url(self, value):
+        if value == '':
+            return None
+        return value
+    
+    def validate_you_url(self, value):
+        if value == '':
+            return None
+        return value
+    
     def __init__(self, *args, **kwargs):
             super(TeacherSerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
-            if request and request.method == 'POST' or request.method == 'PUT' or request.method == 'PATCH':
-                print('Method is POST')
+            if request and request.method in ['POST', 'PUT', 'PATCH']:
+                print('Method is POST/PUT/PATCH')
                 self.Meta.depth = 0
                 print(self.Meta.depth)
             else:
-                print(f"Method is - {request.method}")
+                print(f"Method is - {request.method if request else 'N/A'}")
                 self.Meta.depth = 2
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -25,12 +77,12 @@ class CategorySerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
             super(CategorySerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
-            if request and request.method == 'POST' or request.method == 'PUT' or request.method == 'PATCH':
-                print('Method is POST')
+            if request and request.method in ['POST', 'PUT', 'PATCH']:
+                print('Method is POST/PUT/PATCH')
                 self.Meta.depth = 0
                 print(self.Meta.depth)
             else:
-                print(f"Method is - {request.method}")
+                print(f"Method is - {request.method if request else 'N/A'}")
                 self.Meta.depth = 2
 
 class CourseSerializer(serializers.ModelSerializer):
@@ -66,12 +118,12 @@ class CourseSerializer(serializers.ModelSerializer):
     def __init__(self, *args, **kwargs):
             super(CourseSerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
-            if request and request.method == 'POST' or request.method == 'PUT' or request.method == 'PATCH':
+            if request and request.method in ['POST', 'PUT', 'PATCH']:
                 print('Method is POST/PUT/PATCH')
                 self.Meta.depth = 0
                 print(self.Meta.depth)
             else:
-                print(f"Method is - {request.method}")
+                print(f"Method is - {request.method if request else 'N/A'}")
                 self.Meta.depth = 2
 
 class LessonDownloadableSerializer(serializers.ModelSerializer):
@@ -136,12 +188,12 @@ class ChapterSerializer(serializers.ModelSerializer):
         def __init__(self, *args, **kwargs):
             super(ChapterSerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
-            if request and request.method == 'POST' or request.method == 'PUT' or request.method == 'PATCH':
-                print('Method is POST')
+            if request and request.method in ['POST', 'PUT', 'PATCH']:
+                print('Method is POST/PUT/PATCH')
                 self.Meta.depth = 0
                 print(self.Meta.depth)
             else:
-                print(f"Method is - {request.method}")
+                print(f"Method is - {request.method if request else 'N/A'}")
                 self.Meta.depth = 2
 
 
@@ -169,15 +221,21 @@ class StudentSerializer(serializers.ModelSerializer):
     class Meta:
         model=models.Student
         fields=['id','fullname','email','password','username','interseted_categories','profile_img']
+        extra_kwargs = {
+            'password': {'required': False, 'allow_blank': True},
+            'interseted_categories': {'required': False, 'allow_blank': True},
+            'profile_img': {'required': False},
+        }
+    
     def __init__(self, *args, **kwargs):
             super(StudentSerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
-            if request and request.method == 'POST' or request.method == 'PUT' or request.method == 'PATCH':
-                print('Method is POST')
+            if request and request.method in ['POST', 'PUT', 'PATCH']:
+                print('Method is POST/PUT/PATCH')
                 self.Meta.depth = 0
                 print(self.Meta.depth)
             else:
-                print(f"Method is - {request.method}")
+                print(f"Method is - {request.method if request else 'N/A'}")
                 self.Meta.depth = 2
 
 class StudentCourseEnrollSerializer(serializers.ModelSerializer):
@@ -200,12 +258,12 @@ class StudentCourseEnrollSerializer(serializers.ModelSerializer):
         def __init__(self, *args, **kwargs):
             super(StudentCourseEnrollSerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
-            if request and request.method == 'POST' or request.method == 'PUT' or request.method == 'PATCH':
-                print('Method is POST')
+            if request and request.method in ['POST', 'PUT', 'PATCH']:
+                print('Method is POST/PUT/PATCH')
                 self.Meta.depth = 0
                 print(self.Meta.depth)
             else:
-                print(f"Method is - {request.method}")
+                print(f"Method is - {request.method if request else 'N/A'}")
                 self.Meta.depth = 2
         
         def create(self, validated_data):
@@ -251,6 +309,24 @@ class StudentCourseEnrollSerializer(serializers.ModelSerializer):
                 course_progress.enrollment = enrollment
                 course_progress.save()
             
+            # Auto-create TeacherStudent relationship if not exists
+            if course and course.teacher and student:
+                teacher_student, ts_created = models.TeacherStudent.objects.get_or_create(
+                    teacher=course.teacher,
+                    student=student,
+                    defaults={
+                        'instrument': 'piano',
+                        'level': 'beginner',
+                        'status': 'active',
+                        'progress_percentage': 0,
+                    }
+                )
+                if not ts_created:
+                    # Update last_active timestamp
+                    from django.utils import timezone
+                    teacher_student.last_active = timezone.now()
+                    teacher_student.save(update_fields=['last_active'])
+            
             return enrollment
             
 
@@ -261,12 +337,12 @@ class StudentFavoriteCourseSerializer(serializers.ModelSerializer):
         def __init__(self, *args, **kwargs):
             super(StudentFavoriteCourseSerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
-            if request and request.method == 'POST' or request.method == 'PUT' or request.method == 'PATCH':
-                print('Method is POST')
+            if request and request.method in ['POST', 'PUT', 'PATCH']:
+                print('Method is POST/PUT/PATCH')
                 self.Meta.depth = 0
                 print(self.Meta.depth)
             else:
-                print(f"Method is - {request.method}")
+                print(f"Method is - {request.method if request else 'N/A'}")
                 self.Meta.depth = 2
 
 class CourseRatingSerializer(serializers.ModelSerializer):
@@ -276,12 +352,12 @@ class CourseRatingSerializer(serializers.ModelSerializer):
         def __init__(self, *args, **kwargs):
             super(CourseRatingSerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
-            if request and request.method == 'POST' or request.method == 'PUT' or request.method == 'PATCH':
-                print('Method is POST')
+            if request and request.method in ['POST', 'PUT', 'PATCH']:
+                print('Method is POST/PUT/PATCH')
                 self.Meta.depth = 0
                 print(self.Meta.depth)
             else:
-                print(f"Method is - {request.method}")
+                print(f"Method is - {request.method if request else 'N/A'}")
                 self.Meta.depth = 2
 
 class TeacherDashboardSerializer(serializers.ModelSerializer):
@@ -296,12 +372,12 @@ class StudentDashboardSerializer(serializers.ModelSerializer):
         def __init__(self, *args, **kwargs):
             super(StudentDashboardSerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
-            if request and request.method == 'POST' or request.method == 'PUT' or request.method == 'PATCH':
-                print('Method is POST')
+            if request and request.method in ['POST', 'PUT', 'PATCH']:
+                print('Method is POST/PUT/PATCH')
                 self.Meta.depth = 0
                 print(self.Meta.depth)
             else:
-                print(f"Method is - {request.method}")
+                print(f"Method is - {request.method if request else 'N/A'}")
                 self.Meta.depth = 2
 
 
@@ -313,12 +389,12 @@ class StudyMaterialSerializer(serializers.ModelSerializer):
         def __init__(self, *args, **kwargs):
             super(StudyMaterialSerializer, self).__init__(*args, **kwargs)
             request = self.context.get('request')
-            if request and request.method == 'POST' or request.method == 'PUT' or request.method == 'PATCH':
-                print('Method is POST')
+            if request and request.method in ['POST', 'PUT', 'PATCH']:
+                print('Method is POST/PUT/PATCH')
                 self.Meta.depth = 0
                 print(self.Meta.depth)
             else:
-                print(f"Method is - {request.method}")
+                print(f"Method is - {request.method if request else 'N/A'}")
                 self.Meta.depth = 2
 
 class FaqSerializer(serializers.ModelSerializer):
@@ -596,12 +672,36 @@ class TeacherStudentSerializer(serializers.ModelSerializer):
     student_email = serializers.CharField(source='student.email', read_only=True)
     student_profile_img = serializers.ImageField(source='student.profile_img', read_only=True)
     time_ago = serializers.SerializerMethodField()
+    enrolled_courses = serializers.SerializerMethodField()
+    enrolled_course_count = serializers.SerializerMethodField()
     
     class Meta:
         model = models.TeacherStudent
         fields = ['id', 'teacher', 'student', 'student_name', 'student_email', 
                   'student_profile_img', 'instrument', 'level', 'status', 
-                  'progress_percentage', 'last_active', 'time_ago', 'notes', 'assigned_at']
+                  'progress_percentage', 'last_active', 'time_ago', 'notes', 'assigned_at',
+                  'enrolled_courses', 'enrolled_course_count']
+    
+    def get_enrolled_courses(self, obj):
+        """Get courses this student is enrolled in under this teacher"""
+        enrollments = models.StudentCourseEnrollment.objects.filter(
+            student=obj.student,
+            course__teacher=obj.teacher
+        ).select_related('course')
+        return [{
+            'enrollment_id': e.id,
+            'course_id': e.course.id,
+            'course_title': e.course.title,
+            'progress_percent': e.progress_percent,
+            'enrolled_time': e.enrolled_time.strftime('%Y-%m-%d'),
+            'is_active': e.is_active,
+        } for e in enrollments]
+    
+    def get_enrolled_course_count(self, obj):
+        return models.StudentCourseEnrollment.objects.filter(
+            student=obj.student,
+            course__teacher=obj.teacher
+        ).count()
 
     def get_time_ago(self, obj):
         from django.utils import timezone

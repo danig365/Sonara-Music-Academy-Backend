@@ -195,6 +195,10 @@ urlpatterns =[
         path('teacher/students/<int:teacher_id>/', views.TeacherStudentList.as_view()),
         path('teacher/student/<int:pk>/', views.TeacherStudentDetail.as_view()),
         path('teacher/students-from-enrollments/<int:teacher_id>/', views.get_teacher_students_from_enrollments),
+        path('teacher/search-students/<int:teacher_id>/', views.search_students_for_teacher),
+        path('teacher/assign-course/<int:teacher_id>/', views.assign_course_to_student),
+        path('teacher/unassign-course/<int:teacher_id>/', views.unassign_course_from_student),
+        path('teacher/courses-for-student/<int:teacher_id>/<int:student_id>/', views.get_teacher_courses_for_student),
         
         # Teacher Sessions/Appointments
         path('teacher/sessions/<int:teacher_id>/', views.TeacherSessionList.as_view()),

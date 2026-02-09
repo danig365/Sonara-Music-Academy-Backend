@@ -1423,11 +1423,12 @@ from . serializers import (
 
 
 class TeacherOverviewDashboard(APIView):
-    """Comprehensive teacher dashboard overview with all metrics"""
+    """Comprehensive teacher dashboard overview with real metrics only"""
     
     def get(self, request, teacher_id):
         from datetime import date, timedelta
         from django.utils import timezone
+        from django.db.models import Avg, Sum
         
         try:
             teacher = models.Teacher.objects.get(pk=teacher_id)
@@ -1437,153 +1438,133 @@ class TeacherOverviewDashboard(APIView):
         now = timezone.now()
         last_month = now - timedelta(days=30)
         last_week = now - timedelta(days=7)
+        today = date.today()
         
-        # Calculate metrics
-        # Total students (from TeacherStudent or via enrollments)
+        # ── Total Students ──
+        # Count from TeacherStudent model first, then fall back to distinct enrollment students
         total_students = models.TeacherStudent.objects.filter(teacher=teacher).count()
-        
-        # If no direct assignments, fall back to enrollment-based count
         if total_students == 0:
             total_students = models.StudentCourseEnrollment.objects.filter(
                 course__teacher=teacher
             ).values('student').distinct().count()
         
-        # Previous month students for trend
-        prev_students = models.TeacherStudent.objects.filter(
-            teacher=teacher,
-            assigned_at__lte=last_month
+        # Students added in last 30 days
+        new_students_this_month = models.TeacherStudent.objects.filter(
+            teacher=teacher, assigned_at__gte=last_month
         ).count()
+        if new_students_this_month == 0:
+            new_students_this_month = models.StudentCourseEnrollment.objects.filter(
+                course__teacher=teacher, enrolled_time__gte=last_month
+            ).values('student').distinct().count()
         
-        if prev_students > 0:
-            students_trend = ((total_students - prev_students) / prev_students) * 100
-        else:
-            students_trend = 100 if total_students > 0 else 0
+        # ── Courses ──
+        total_courses = models.Course.objects.filter(teacher=teacher).count()
         
-        # Active lessons (published lessons + courses)
-        active_lessons = models.Lesson.objects.filter(teacher=teacher, is_published=True).count()
-        if active_lessons == 0:
-            active_lessons = models.Course.objects.filter(teacher=teacher).count()
+        # ── Total Chapters & Lessons ──
+        total_chapters = models.Chapter.objects.filter(course__teacher=teacher).count()
+        total_module_lessons = models.ModuleLesson.objects.filter(module__course__teacher=teacher).count()
         
-        new_lessons = models.Lesson.objects.filter(
-            teacher=teacher,
-            created_at__gte=last_week
-        ).count()
+        # Lesson Library items
+        lesson_library_count = models.Lesson.objects.filter(teacher=teacher, is_published=True).count()
         
-        lessons_trend = (new_lessons / active_lessons * 100) if active_lessons > 0 else 0
-        
-        # Completion rate based on course progress
+        # ── Enrollments ──
         total_enrollments = models.StudentCourseEnrollment.objects.filter(
             course__teacher=teacher
         ).count()
-        completed_courses = models.CourseProgress.objects.filter(
-            course__teacher=teacher,
-            is_completed=True
+        active_enrollments = models.StudentCourseEnrollment.objects.filter(
+            course__teacher=teacher, is_active=True
         ).count()
-        completion_rate = (completed_courses / total_enrollments * 100) if total_enrollments > 0 else 87
-        
-        # Calculate completion trend (using month-over-month course completions)
-        prev_completed = models.CourseProgress.objects.filter(
-            course__teacher=teacher,
-            is_completed=True,
-            completed_at__lte=last_month
+        new_enrollments_this_week = models.StudentCourseEnrollment.objects.filter(
+            course__teacher=teacher, enrolled_time__gte=last_week
         ).count()
         
-        prev_total = models.StudentCourseEnrollment.objects.filter(
-            course__teacher=teacher,
-            enrolled_time__lte=last_month
+        # ── Completion Rate ──
+        completed_count = models.CourseProgress.objects.filter(
+            course__teacher=teacher, is_completed=True
         ).count()
+        completion_rate = round((completed_count / total_enrollments * 100), 1) if total_enrollments > 0 else 0
         
-        if prev_total > 0:
-            prev_rate = (prev_completed / prev_total) * 100
-            completion_trend = completion_rate - prev_rate
-        else:
-            completion_trend = -2  # Default placeholder
+        # Average progress across all enrollments
+        avg_progress = models.StudentCourseEnrollment.objects.filter(
+            course__teacher=teacher
+        ).aggregate(avg=Avg('progress_percent'))['avg'] or 0
         
-        # Recent activities (last 10)
+        # ── Recent Activities (real only) ──
         recent_activities = models.TeacherActivity.objects.filter(
             teacher=teacher
-        ).select_related('student')[:10]
+        ).select_related('student').order_by('-created_at')[:10]
+        
+        icon_map = {
+            'lesson_completed': 'check',
+            'assignment_submitted': 'document',
+            'course_started': 'play',
+            'comment_added': 'comment',
+            'material_downloaded': 'download',
+            'session_attended': 'calendar',
+        }
         
         activities_data = [{
-            'id': activity.id,
-            'student_name': activity.student.fullname,
-            'student_profile_img': activity.student.profile_img.url if activity.student.profile_img else None,
-            'activity_type': activity.activity_type,
-            'target_name': activity.target_name,
-            'target_id': activity.target_id,
-            'time_ago': activity.time_ago,
-            'icon_type': {
-                'lesson_completed': 'check',
-                'assignment_submitted': 'document',
-                'course_started': 'play',
-                'comment_added': 'comment',
-                'material_downloaded': 'download',
-            }.get(activity.activity_type, 'default')
-        } for activity in recent_activities]
+            'id': a.id,
+            'student_name': a.student.fullname if a.student else 'Unknown',
+            'student_profile_img': a.student.profile_img.url if a.student and a.student.profile_img else None,
+            'activity_type': a.activity_type,
+            'target_name': a.target_name,
+            'target_id': a.target_id,
+            'time_ago': a.time_ago,
+            'icon_type': icon_map.get(a.activity_type, 'default')
+        } for a in recent_activities]
         
-        # If no activities exist, create sample data for demonstration
-        if not activities_data:
-            # Get enrolled students to create realistic placeholder data
-            enrolled = models.StudentCourseEnrollment.objects.filter(
-                course__teacher=teacher
-            ).select_related('student', 'course')[:4]
-            
-            sample_activities = [
-                {'type': 'lesson_completed', 'action': 'completed lesson', 'icon': 'check'},
-                {'type': 'assignment_submitted', 'action': 'submitted assignment', 'icon': 'document'},
-                {'type': 'course_started', 'action': 'started course', 'icon': 'play'},
-                {'type': 'comment_added', 'action': 'commented on', 'icon': 'comment'},
-            ]
-            
-            for i, enrollment in enumerate(enrolled):
-                if i < len(sample_activities):
-                    activity = sample_activities[i]
-                    activities_data.append({
-                        'id': i + 1,
-                        'student_name': enrollment.student.fullname,
-                        'student_profile_img': enrollment.student.profile_img.url if enrollment.student.profile_img else None,
-                        'activity_type': activity['type'],
-                        'target_name': enrollment.course.title,
-                        'target_id': enrollment.course.id,
-                        'time_ago': ['2 hours ago', '4 hours ago', 'Yesterday', 'Yesterday'][i],
-                        'icon_type': activity['icon']
-                    })
-        
-        # Upcoming sessions (next 5)
-        today = date.today()
+        # ── Upcoming Sessions (real only) ──
         upcoming_sessions = models.TeacherSession.objects.filter(
             teacher=teacher,
             scheduled_date__gte=today,
             status__in=['confirmed', 'pending']
-        ).select_related('student')[:5]
+        ).select_related('student').order_by('scheduled_date', 'scheduled_time')[:5]
         
         sessions_data = [{
-            'id': session.id,
-            'student_name': session.student.fullname,
-            'student_profile_img': session.student.profile_img.url if session.student.profile_img else None,
-            'title': session.title,
-            'scheduled_date': session.scheduled_date.strftime('%Y-%m-%d'),
-            'scheduled_time': session.scheduled_time.strftime('%H:%M'),
-            'status': session.status,
-            'duration_minutes': session.duration_minutes
-        } for session in upcoming_sessions]
+            'id': s.id,
+            'student_name': s.student.fullname if s.student else 'Unknown',
+            'student_profile_img': s.student.profile_img.url if s.student and s.student.profile_img else None,
+            'title': s.title,
+            'scheduled_date': s.scheduled_date.strftime('%Y-%m-%d'),
+            'scheduled_time': s.scheduled_time.strftime('%H:%M'),
+            'status': s.status,
+            'duration_minutes': s.duration_minutes,
+        } for s in upcoming_sessions]
         
-        # If no sessions exist, create sample data
-        if not sessions_data:
-            sample_times = ['14:00', '15:30', '17:00']
-            sample_lessons = ['Piano - Advanced', 'Theory Review', 'Composition']
-            
-            for i, enrollment in enumerate(enrolled[:3]):
-                sessions_data.append({
-                    'id': i + 1,
-                    'student_name': enrollment.student.fullname,
-                    'student_profile_img': enrollment.student.profile_img.url if enrollment.student.profile_img else None,
-                    'title': sample_lessons[i] if i < len(sample_lessons) else 'Music Session',
-                    'scheduled_date': today.strftime('%Y-%m-%d'),
-                    'scheduled_time': sample_times[i] if i < len(sample_times) else '10:00',
-                    'status': 'confirmed' if i % 2 == 0 else 'pending',
-                    'duration_minutes': 60
-                })
+        # ── Recent Enrollments (latest 5) ──
+        recent_enrollments = models.StudentCourseEnrollment.objects.filter(
+            course__teacher=teacher
+        ).select_related('student', 'course').order_by('-enrolled_time')[:5]
+        
+        recent_enrollments_data = [{
+            'student_name': e.student.fullname,
+            'student_profile_img': e.student.profile_img.url if e.student.profile_img else None,
+            'course_title': e.course.title,
+            'enrolled_time': e.enrolled_time.strftime('%Y-%m-%d %H:%M') if e.enrolled_time else None,
+            'progress_percent': e.progress_percent,
+        } for e in recent_enrollments]
+        
+        # ── Top Courses by enrollment ──
+        teacher_courses = models.Course.objects.filter(teacher=teacher)
+        courses_data = []
+        for course in teacher_courses:
+            enroll_count = models.StudentCourseEnrollment.objects.filter(course=course).count()
+            chapter_count = models.Chapter.objects.filter(course=course).count()
+            lesson_count = models.ModuleLesson.objects.filter(module__course=course).count()
+            avg_prog = models.StudentCourseEnrollment.objects.filter(
+                course=course
+            ).aggregate(avg=Avg('progress_percent'))['avg'] or 0
+            courses_data.append({
+                'id': course.id,
+                'title': course.title,
+                'featured_img': course.featured_img.url if course.featured_img else None,
+                'total_enrolled': enroll_count,
+                'chapter_count': chapter_count,
+                'lesson_count': lesson_count,
+                'avg_progress': round(avg_prog, 1),
+            })
+        courses_data.sort(key=lambda x: x['total_enrolled'], reverse=True)
         
         return Response({
             'teacher_id': teacher.id,
@@ -1591,21 +1572,26 @@ class TeacherOverviewDashboard(APIView):
             'teacher_profile_img': teacher.profile_img.url if teacher.profile_img else None,
             
             # Metrics
-            'total_students': total_students if total_students > 0 else 24,
-            'active_lessons': active_lessons if active_lessons > 0 else 142,
-            'completion_rate': round(completion_rate, 1) if completion_rate > 0 else 87,
+            'total_students': total_students,
+            'total_courses': total_courses,
+            'total_chapters': total_chapters,
+            'total_lessons': total_module_lessons,
+            'lesson_library_count': lesson_library_count,
+            'total_enrollments': total_enrollments,
+            'active_enrollments': active_enrollments,
+            'completed_courses': completed_count,
+            'completion_rate': completion_rate,
+            'avg_progress': round(avg_progress, 1),
             
             # Trends
-            'students_trend': round(students_trend, 1) if students_trend != 0 else 12,
-            'students_trend_direction': 'up' if students_trend >= 0 else 'down',
-            'lessons_trend': round(lessons_trend, 1) if lessons_trend != 0 else 8,
-            'lessons_trend_direction': 'up' if lessons_trend >= 0 else 'down',
-            'completion_trend': round(completion_trend, 1),
-            'completion_trend_direction': 'up' if completion_trend >= 0 else 'down',
+            'new_students_this_month': new_students_this_month,
+            'new_enrollments_this_week': new_enrollments_this_week,
             
-            # Data
+            # Lists
             'recent_activities': activities_data,
-            'upcoming_sessions': sessions_data
+            'upcoming_sessions': sessions_data,
+            'recent_enrollments': recent_enrollments_data,
+            'courses': courses_data,
         })
 
 
@@ -1647,6 +1633,186 @@ class TeacherStudentDetail(generics.RetrieveUpdateDestroyAPIView):
     """Get, update or delete a teacher-student relationship"""
     queryset = models.TeacherStudent.objects.all()
     serializer_class = TeacherStudentSerializer
+
+
+@csrf_exempt
+def search_students_for_teacher(request, teacher_id):
+    """Search all students so teacher can add them. Excludes already-assigned students."""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET only'}, status=405)
+    
+    search = request.GET.get('search', '').strip()
+    if len(search) < 2:
+        return JsonResponse({'students': [], 'message': 'Enter at least 2 characters'})
+    
+    try:
+        teacher = models.Teacher.objects.get(pk=teacher_id)
+    except models.Teacher.DoesNotExist:
+        return JsonResponse({'error': 'Teacher not found'}, status=404)
+    
+    # Get IDs of students already assigned to this teacher
+    assigned_ids = models.TeacherStudent.objects.filter(
+        teacher=teacher
+    ).values_list('student_id', flat=True)
+    
+    # Search students not yet assigned
+    students = models.Student.objects.filter(
+        Q(fullname__icontains=search) | Q(email__icontains=search)
+    ).exclude(id__in=assigned_ids)[:20]
+    
+    results = [{
+        'id': s.id,
+        'fullname': s.fullname,
+        'email': s.email,
+        'profile_img': s.profile_img.url if s.profile_img else None,
+    } for s in students]
+    
+    return JsonResponse({'students': results})
+
+
+@csrf_exempt
+def assign_course_to_student(request, teacher_id):
+    """Teacher assigns one of their courses to a student (creates enrollment)"""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    
+    import json
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    
+    student_id = data.get('student_id')
+    course_id = data.get('course_id')
+    
+    if not student_id or not course_id:
+        return JsonResponse({'error': 'student_id and course_id required'}, status=400)
+    
+    try:
+        teacher = models.Teacher.objects.get(pk=teacher_id)
+        student = models.Student.objects.get(pk=student_id)
+        course = models.Course.objects.get(pk=course_id, teacher=teacher)
+    except models.Teacher.DoesNotExist:
+        return JsonResponse({'error': 'Teacher not found'}, status=404)
+    except models.Student.DoesNotExist:
+        return JsonResponse({'error': 'Student not found'}, status=404)
+    except models.Course.DoesNotExist:
+        return JsonResponse({'error': 'Course not found or does not belong to this teacher'}, status=404)
+    
+    # Check if already enrolled
+    if models.StudentCourseEnrollment.objects.filter(course=course, student=student).exists():
+        return JsonResponse({'bool': False, 'message': 'Student is already enrolled in this course'})
+    
+    # Create enrollment
+    enrollment = models.StudentCourseEnrollment.objects.create(
+        course=course,
+        student=student,
+        is_active=True,
+        progress_percent=0
+    )
+    
+    # Create CourseProgress record
+    total_lessons = 0
+    for chapter in course.course_chapters.all():
+        total_lessons += chapter.module_lessons.count()
+    
+    models.CourseProgress.objects.get_or_create(
+        student=student,
+        course=course,
+        defaults={
+            'enrollment': enrollment,
+            'total_chapters': total_lessons,
+            'completed_chapters': 0,
+            'progress_percentage': 0,
+            'is_completed': False
+        }
+    )
+    
+    # Ensure TeacherStudent relationship exists
+    teacher_student, created = models.TeacherStudent.objects.get_or_create(
+        teacher=teacher,
+        student=student,
+        defaults={
+            'instrument': 'piano',
+            'level': 'beginner',
+            'status': 'active',
+            'progress_percentage': 0,
+        }
+    )
+    
+    return JsonResponse({
+        'bool': True,
+        'message': f'{student.fullname} enrolled in {course.title}',
+        'enrollment_id': enrollment.id
+    })
+
+
+@csrf_exempt
+def unassign_course_from_student(request, teacher_id):
+    """Teacher removes a student's enrollment from one of their courses"""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST only'}, status=405)
+    
+    import json
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    
+    student_id = data.get('student_id')
+    course_id = data.get('course_id')
+    
+    if not student_id or not course_id:
+        return JsonResponse({'error': 'student_id and course_id required'}, status=400)
+    
+    try:
+        teacher = models.Teacher.objects.get(pk=teacher_id)
+        course = models.Course.objects.get(pk=course_id, teacher=teacher)
+    except (models.Teacher.DoesNotExist, models.Course.DoesNotExist):
+        return JsonResponse({'error': 'Not found'}, status=404)
+    
+    deleted_count, _ = models.StudentCourseEnrollment.objects.filter(
+        course=course, student_id=student_id
+    ).delete()
+    
+    # Also delete CourseProgress
+    models.CourseProgress.objects.filter(
+        course=course, student_id=student_id
+    ).delete()
+    
+    if deleted_count > 0:
+        return JsonResponse({'bool': True, 'message': 'Enrollment removed'})
+    return JsonResponse({'bool': False, 'message': 'Enrollment not found'})
+
+
+def get_teacher_courses_for_student(request, teacher_id, student_id):
+    """Get teacher's courses with enrollment status for a specific student"""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'GET only'}, status=405)
+    
+    try:
+        teacher = models.Teacher.objects.get(pk=teacher_id)
+        student = models.Student.objects.get(pk=student_id)
+    except (models.Teacher.DoesNotExist, models.Student.DoesNotExist):
+        return JsonResponse({'error': 'Not found'}, status=404)
+    
+    courses = models.Course.objects.filter(teacher=teacher)
+    enrolled_course_ids = set(
+        models.StudentCourseEnrollment.objects.filter(
+            student=student, course__teacher=teacher
+        ).values_list('course_id', flat=True)
+    )
+    
+    course_list = [{
+        'id': c.id,
+        'title': c.title,
+        'description': c.description[:100] + '...' if len(c.description) > 100 else c.description,
+        'featured_img': c.featured_img.url if c.featured_img else None,
+        'is_enrolled': c.id in enrolled_course_ids,
+        'total_enrolled': c.total_enrolled_students(),
+    } for c in courses]
+    
+    return JsonResponse({'courses': course_list})
 
 
 @csrf_exempt
@@ -1934,15 +2100,21 @@ class TeacherProgressDashboard(APIView):
     
     def get(self, request, teacher_id):
         from datetime import date, timedelta
-        from django.db.models import Count, Avg
+        from django.db.models import Count, Avg, Sum, Q
+        from django.utils import timezone
         
         try:
             teacher = models.Teacher.objects.get(pk=teacher_id)
         except models.Teacher.DoesNotExist:
             return Response({'error': 'Teacher not found'}, status=404)
         
-        # Overall class performance
-        students = models.TeacherStudent.objects.filter(teacher=teacher)
+        # Auto-update student statuses based on last activity
+        for ts in models.TeacherStudent.objects.filter(teacher=teacher):
+            ts.update_status()
+        
+        # Reload after status updates
+        students = models.TeacherStudent.objects.filter(teacher=teacher).select_related('student')
+        total_students = students.count()
         avg_progress = students.aggregate(avg=Avg('progress_percentage'))['avg'] or 0
         
         # Progress distribution
@@ -1953,79 +2125,144 @@ class TeacherProgressDashboard(APIView):
             'needs_improvement': students.filter(progress_percentage__lt=40).count(),
         }
         
-        # Student progress list
-        student_progress = [{
-            'id': s.id,
-            'student_name': s.student.fullname,
-            'student_profile_img': s.student.profile_img.url if s.student.profile_img else None,
-            'instrument': s.instrument,
-            'level': s.level,
-            'progress_percentage': s.progress_percentage,
-            'status': s.status,
-            'last_active': s.last_active.strftime('%Y-%m-%d')
-        } for s in students]
+        # Student progress list with course enrollment data
+        student_progress = []
+        for s in students:
+            # Get total enrolled courses for this student under this teacher
+            enrolled_courses = models.StudentCourseEnrollment.objects.filter(
+                student=s.student,
+                course__teacher=teacher
+            ).count()
+            completed_courses = models.CourseProgress.objects.filter(
+                student=s.student,
+                course__teacher=teacher,
+                is_completed=True
+            ).count()
+            # Total time spent across all teacher's courses
+            time_spent = models.CourseProgress.objects.filter(
+                student=s.student,
+                course__teacher=teacher
+            ).aggregate(total=Sum('total_time_spent_seconds'))['total'] or 0
+            
+            student_progress.append({
+                'id': s.id,
+                'student_id': s.student.id,
+                'student_name': s.student.fullname,
+                'student_email': s.student.email,
+                'student_profile_img': s.student.profile_img.url if s.student.profile_img else None,
+                'instrument': s.instrument,
+                'level': s.level,
+                'progress_percentage': s.progress_percentage,
+                'status': s.status,
+                'last_active': s.last_active.strftime('%Y-%m-%d'),
+                'enrolled_courses': enrolled_courses,
+                'completed_courses': completed_courses,
+                'time_spent_minutes': round(time_spent / 60),
+                'notes': s.notes or '',
+            })
         
         # Lesson and course completion stats
         total_lessons = models.Lesson.objects.filter(teacher=teacher).count()
         total_enrollments = models.StudentCourseEnrollment.objects.filter(
             course__teacher=teacher
         ).count()
-        completed_courses = models.CourseProgress.objects.filter(
+        total_completed_courses = models.CourseProgress.objects.filter(
             course__teacher=teacher,
             is_completed=True
         ).count()
         
-        # Weekly activity (last 7 days)
+        # Completion rate based on lesson completions across all students
+        total_lesson_records = models.LessonProgress.objects.filter(
+            course__teacher=teacher
+        ).count()
+        completed_lesson_records = models.LessonProgress.objects.filter(
+            course__teacher=teacher,
+            is_completed=True
+        ).count()
+        completion_rate = round(
+            (completed_lesson_records / total_lesson_records * 100) if total_lesson_records > 0 else 0, 1
+        )
+        
+        # Weekly activity (last 7 days) — combine teacher activities + student daily learning
         today = date.today()
         weekly_activity = []
+        student_ids = list(students.values_list('student_id', flat=True))
         for i in range(6, -1, -1):
             day = today - timedelta(days=i)
-            activities = models.TeacherActivity.objects.filter(
+            teacher_activities = models.TeacherActivity.objects.filter(
                 teacher=teacher,
                 created_at__date=day
             ).count()
+            student_activities = models.DailyLearningActivity.objects.filter(
+                student_id__in=student_ids,
+                date=day
+            ).aggregate(
+                lessons=Sum('lessons_completed'),
+                time=Sum('total_time_seconds')
+            )
             weekly_activity.append({
                 'date': day.strftime('%a'),
                 'full_date': day.strftime('%Y-%m-%d'),
-                'activities': activities
+                'activities': teacher_activities + (student_activities['lessons'] or 0),
+                'time_minutes': round((student_activities['time'] or 0) / 60),
             })
         
-        # Top performing students
+        # Top performing students (sorted by progress)
         top_students = students.order_by('-progress_percentage')[:5]
         top_students_data = [{
             'id': s.id,
             'student_name': s.student.fullname,
+            'student_profile_img': s.student.profile_img.url if s.student.profile_img else None,
             'progress_percentage': s.progress_percentage,
-            'level': s.level
+            'level': s.level,
+            'instrument': s.instrument,
         } for s in top_students]
         
         # Students needing attention
         attention_students = students.filter(
-            models.Q(status='warning') | 
-            models.Q(status='inactive') |
-            models.Q(progress_percentage__lt=30)
-        )[:5]
+            Q(status='warning') | 
+            Q(status='inactive') |
+            Q(progress_percentage__lt=30)
+        ).order_by('progress_percentage')[:5]
         
         attention_data = [{
             'id': s.id,
             'student_name': s.student.fullname,
+            'student_profile_img': s.student.profile_img.url if s.student.profile_img else None,
             'progress_percentage': s.progress_percentage,
             'status': s.status,
-            'last_active': s.last_active.strftime('%Y-%m-%d')
+            'last_active': s.last_active.strftime('%Y-%m-%d'),
+            'instrument': s.instrument,
         } for s in attention_students]
+        
+        # Course-level stats for the teacher
+        teacher_courses = models.Course.objects.filter(teacher=teacher)
+        course_stats = []
+        for course in teacher_courses:
+            enrollments = models.StudentCourseEnrollment.objects.filter(course=course).count()
+            avg_course_progress = models.CourseProgress.objects.filter(
+                course=course
+            ).aggregate(avg=Avg('progress_percentage'))['avg'] or 0
+            course_stats.append({
+                'id': course.id,
+                'title': course.title,
+                'enrollments': enrollments,
+                'avg_progress': round(avg_course_progress, 1),
+            })
         
         return Response({
             'overall_progress': round(avg_progress, 1),
-            'total_students': students.count(),
+            'total_students': total_students,
             'total_lessons': total_lessons,
-            'total_assignments': total_assignments,
-            'completed_assignments': completed_assignments,
-            'completion_rate': round((completed_assignments / total_assignments * 100) if total_assignments > 0 else 0, 1),
+            'total_enrollments': total_enrollments,
+            'total_completed_courses': total_completed_courses,
+            'completion_rate': completion_rate,
             'progress_distribution': progress_distribution,
             'student_progress': student_progress,
             'weekly_activity': weekly_activity,
             'top_students': top_students_data,
-            'attention_needed': attention_data
+            'attention_needed': attention_data,
+            'course_stats': course_stats,
         })
 
 
