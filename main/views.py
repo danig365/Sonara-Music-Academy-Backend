@@ -1484,10 +1484,10 @@ class TeacherOverviewDashboard(APIView):
         ).count()
         completion_rate = round((completed_count / total_enrollments * 100), 1) if total_enrollments > 0 else 0
         
-        # Average progress across all enrollments
-        avg_progress = models.StudentCourseEnrollment.objects.filter(
+        # Average progress across all enrollments (from CourseProgress for accuracy)
+        avg_progress = models.CourseProgress.objects.filter(
             course__teacher=teacher
-        ).aggregate(avg=Avg('progress_percent'))['avg'] or 0
+        ).aggregate(avg=Avg('progress_percentage'))['avg'] or 0
         
         # ── Recent Activities (real only) ──
         recent_activities = models.TeacherActivity.objects.filter(
@@ -1501,6 +1501,8 @@ class TeacherOverviewDashboard(APIView):
             'comment_added': 'comment',
             'material_downloaded': 'download',
             'session_attended': 'calendar',
+            'course_completed': 'trophy',
+            'enrolled': 'person-plus',
         }
         
         activities_data = [{
@@ -1513,6 +1515,68 @@ class TeacherOverviewDashboard(APIView):
             'time_ago': a.time_ago,
             'icon_type': icon_map.get(a.activity_type, 'default')
         } for a in recent_activities]
+        
+        # If no TeacherActivity records, build activity feed from real events
+        if not activities_data:
+            from django.utils.timesince import timesince
+            raw_events = []
+            
+            # Lesson completions
+            completed_lessons = models.ModuleLessonProgress.objects.filter(
+                lesson__module__course__teacher=teacher,
+                is_completed=True
+            ).select_related('student', 'lesson', 'lesson__module__course').order_by('-completed_at')[:10]
+            for lp in completed_lessons:
+                raw_events.append({
+                    'id': f'lp-{lp.id}',
+                    'student_name': lp.student.fullname,
+                    'student_profile_img': lp.student.profile_img.url if lp.student.profile_img else None,
+                    'activity_type': 'lesson_completed',
+                    'target_name': lp.lesson.title,
+                    'target_id': lp.lesson.module.course.id if lp.lesson.module else None,
+                    'time_ago': timesince(lp.completed_at) + ' ago' if lp.completed_at else 'recently',
+                    'icon_type': 'check',
+                    'sort_time': lp.completed_at or lp.viewed_at,
+                })
+            
+            # Course completions
+            completed_courses = models.CourseProgress.objects.filter(
+                course__teacher=teacher,
+                is_completed=True
+            ).select_related('student', 'course').order_by('-completed_at')[:10]
+            for cp in completed_courses:
+                raw_events.append({
+                    'id': f'cp-{cp.id}',
+                    'student_name': cp.student.fullname,
+                    'student_profile_img': cp.student.profile_img.url if cp.student.profile_img else None,
+                    'activity_type': 'course_completed',
+                    'target_name': cp.course.title,
+                    'target_id': cp.course.id,
+                    'time_ago': timesince(cp.completed_at) + ' ago' if cp.completed_at else 'recently',
+                    'icon_type': 'trophy',
+                    'sort_time': cp.completed_at or cp.started_at,
+                })
+            
+            # Enrollments
+            recent_enroll_activities = models.StudentCourseEnrollment.objects.filter(
+                course__teacher=teacher
+            ).select_related('student', 'course').order_by('-enrolled_time')[:10]
+            for e in recent_enroll_activities:
+                raw_events.append({
+                    'id': f'en-{e.id}',
+                    'student_name': e.student.fullname,
+                    'student_profile_img': e.student.profile_img.url if e.student.profile_img else None,
+                    'activity_type': 'enrolled',
+                    'target_name': e.course.title,
+                    'target_id': e.course.id,
+                    'time_ago': timesince(e.enrolled_time) + ' ago' if e.enrolled_time else 'recently',
+                    'icon_type': 'person-plus',
+                    'sort_time': e.enrolled_time,
+                })
+            
+            # Sort all events by time (most recent first), take top 10
+            raw_events.sort(key=lambda x: x['sort_time'] or now, reverse=True)
+            activities_data = [{k: v for k, v in evt.items() if k != 'sort_time'} for evt in raw_events[:10]]
         
         # ── Upcoming Sessions (real only) ──
         upcoming_sessions = models.TeacherSession.objects.filter(
@@ -1537,13 +1601,17 @@ class TeacherOverviewDashboard(APIView):
             course__teacher=teacher
         ).select_related('student', 'course').order_by('-enrolled_time')[:5]
         
-        recent_enrollments_data = [{
-            'student_name': e.student.fullname,
-            'student_profile_img': e.student.profile_img.url if e.student.profile_img else None,
-            'course_title': e.course.title,
-            'enrolled_time': e.enrolled_time.strftime('%Y-%m-%d %H:%M') if e.enrolled_time else None,
-            'progress_percent': e.progress_percent,
-        } for e in recent_enrollments]
+        recent_enrollments_data = []
+        for e in recent_enrollments:
+            cp = models.CourseProgress.objects.filter(student=e.student, course=e.course).first()
+            real_progress = cp.progress_percentage if cp else e.progress_percent
+            recent_enrollments_data.append({
+                'student_name': e.student.fullname,
+                'student_profile_img': e.student.profile_img.url if e.student.profile_img else None,
+                'course_title': e.course.title,
+                'enrolled_time': e.enrolled_time.strftime('%Y-%m-%d %H:%M') if e.enrolled_time else None,
+                'progress_percent': real_progress,
+            })
         
         # ── Top Courses by enrollment ──
         teacher_courses = models.Course.objects.filter(teacher=teacher)
@@ -1552,9 +1620,9 @@ class TeacherOverviewDashboard(APIView):
             enroll_count = models.StudentCourseEnrollment.objects.filter(course=course).count()
             chapter_count = models.Chapter.objects.filter(course=course).count()
             lesson_count = models.ModuleLesson.objects.filter(module__course=course).count()
-            avg_prog = models.StudentCourseEnrollment.objects.filter(
+            avg_prog = models.CourseProgress.objects.filter(
                 course=course
-            ).aggregate(avg=Avg('progress_percent'))['avg'] or 0
+            ).aggregate(avg=Avg('progress_percentage'))['avg'] or 0
             courses_data.append({
                 'id': course.id,
                 'title': course.title,
@@ -1703,13 +1771,22 @@ def assign_course_to_student(request, teacher_id):
     if models.StudentCourseEnrollment.objects.filter(course=course, student=student).exists():
         return JsonResponse({'bool': False, 'message': 'Student is already enrolled in this course'})
     
-    # Create enrollment
+    # Find student's active subscription to link with enrollment
+    from .access_control import SubscriptionAccessControl
+    active_subscription = SubscriptionAccessControl.get_active_subscription(student.id)
+    
+    # Create enrollment (linked to subscription if available)
     enrollment = models.StudentCourseEnrollment.objects.create(
         course=course,
         student=student,
+        subscription=active_subscription,
         is_active=True,
         progress_percent=0
     )
+    
+    # Record course enrollment in subscription usage tracking
+    if active_subscription:
+        active_subscription.record_course_enrollment()
     
     # Create CourseProgress record
     total_lessons = 0
@@ -1838,12 +1915,13 @@ def get_teacher_students_from_enrollments(request, teacher_id):
                 ).first()
                 
                 # Calculate progress
+                from django.db.models import Avg as DbAvg
                 course_progress = models.CourseProgress.objects.filter(
                     student=student,
                     course__teacher=teacher
                 )
                 avg_progress = course_progress.aggregate(
-                    avg=models.Avg('progress_percentage')
+                    avg=DbAvg('progress_percentage')
                 )['avg'] or 0
                 
                 students_map[student.id] = {
@@ -2115,15 +2193,27 @@ class TeacherProgressDashboard(APIView):
         # Reload after status updates
         students = models.TeacherStudent.objects.filter(teacher=teacher).select_related('student')
         total_students = students.count()
-        avg_progress = students.aggregate(avg=Avg('progress_percentage'))['avg'] or 0
         
-        # Progress distribution
-        progress_distribution = {
-            'excellent': students.filter(progress_percentage__gte=80).count(),
-            'good': students.filter(progress_percentage__gte=60, progress_percentage__lt=80).count(),
-            'average': students.filter(progress_percentage__gte=40, progress_percentage__lt=60).count(),
-            'needs_improvement': students.filter(progress_percentage__lt=40).count(),
-        }
+        # Calculate real avg_progress from CourseProgress
+        avg_progress = models.CourseProgress.objects.filter(
+            course__teacher=teacher
+        ).aggregate(avg=Avg('progress_percentage'))['avg'] or 0
+        
+        # Build real progress distribution from CourseProgress per student
+        progress_counts = {'excellent': 0, 'good': 0, 'average': 0, 'needs_improvement': 0}
+        for s in students:
+            student_avg = models.CourseProgress.objects.filter(
+                student=s.student, course__teacher=teacher
+            ).aggregate(avg=Avg('progress_percentage'))['avg'] or 0
+            if student_avg >= 80:
+                progress_counts['excellent'] += 1
+            elif student_avg >= 60:
+                progress_counts['good'] += 1
+            elif student_avg >= 40:
+                progress_counts['average'] += 1
+            else:
+                progress_counts['needs_improvement'] += 1
+        progress_distribution = progress_counts
         
         # Student progress list with course enrollment data
         student_progress = []
@@ -2144,6 +2234,11 @@ class TeacherProgressDashboard(APIView):
                 course__teacher=teacher
             ).aggregate(total=Sum('total_time_spent_seconds'))['total'] or 0
             
+            # Calculate real progress from CourseProgress
+            real_progress = models.CourseProgress.objects.filter(
+                student=s.student, course__teacher=teacher
+            ).aggregate(avg=Avg('progress_percentage'))['avg'] or 0
+            
             student_progress.append({
                 'id': s.id,
                 'student_id': s.student.id,
@@ -2152,7 +2247,7 @@ class TeacherProgressDashboard(APIView):
                 'student_profile_img': s.student.profile_img.url if s.student.profile_img else None,
                 'instrument': s.instrument,
                 'level': s.level,
-                'progress_percentage': s.progress_percentage,
+                'progress_percentage': round(real_progress),
                 'status': s.status,
                 'last_active': s.last_active.strftime('%Y-%m-%d'),
                 'enrolled_courses': enrolled_courses,
@@ -2162,7 +2257,7 @@ class TeacherProgressDashboard(APIView):
             })
         
         # Lesson and course completion stats
-        total_lessons = models.Lesson.objects.filter(teacher=teacher).count()
+        total_lessons = models.ModuleLesson.objects.filter(module__course__teacher=teacher).count()
         total_enrollments = models.StudentCourseEnrollment.objects.filter(
             course__teacher=teacher
         ).count()
@@ -2171,28 +2266,32 @@ class TeacherProgressDashboard(APIView):
             is_completed=True
         ).count()
         
-        # Completion rate based on lesson completions across all students
-        total_lesson_records = models.LessonProgress.objects.filter(
-            course__teacher=teacher
+        # Completion rate based on actual lesson completions (ModuleLessonProgress)
+        total_lesson_records = models.ModuleLessonProgress.objects.filter(
+            lesson__module__course__teacher=teacher
         ).count()
-        completed_lesson_records = models.LessonProgress.objects.filter(
-            course__teacher=teacher,
+        completed_lesson_records = models.ModuleLessonProgress.objects.filter(
+            lesson__module__course__teacher=teacher,
             is_completed=True
         ).count()
         completion_rate = round(
             (completed_lesson_records / total_lesson_records * 100) if total_lesson_records > 0 else 0, 1
         )
         
-        # Weekly activity (last 7 days) — combine teacher activities + student daily learning
+        # Weekly activity (last 7 days) — combine all real activity sources
         today = date.today()
         weekly_activity = []
         student_ids = list(students.values_list('student_id', flat=True))
         for i in range(6, -1, -1):
             day = today - timedelta(days=i)
-            teacher_activities = models.TeacherActivity.objects.filter(
+            
+            # TeacherActivity records
+            teacher_act_count = models.TeacherActivity.objects.filter(
                 teacher=teacher,
                 created_at__date=day
             ).count()
+            
+            # DailyLearningActivity records
             student_activities = models.DailyLearningActivity.objects.filter(
                 student_id__in=student_ids,
                 date=day
@@ -2200,40 +2299,89 @@ class TeacherProgressDashboard(APIView):
                 lessons=Sum('lessons_completed'),
                 time=Sum('total_time_seconds')
             )
+            daily_lessons = student_activities['lessons'] or 0
+            daily_time = student_activities['time'] or 0
+            
+            # If no TeacherActivity/DailyLearningActivity, count from real progress data
+            if teacher_act_count == 0 and daily_lessons == 0:
+                # Lesson completions on this day
+                lesson_completions = models.ModuleLessonProgress.objects.filter(
+                    lesson__module__course__teacher=teacher,
+                    is_completed=True,
+                    completed_at__date=day
+                ).count()
+                
+                # Lesson views on this day (not yet completed)
+                lesson_views = models.ModuleLessonProgress.objects.filter(
+                    lesson__module__course__teacher=teacher,
+                    viewed_at__date=day
+                ).count()
+                
+                # Enrollments on this day
+                enrollment_count = models.StudentCourseEnrollment.objects.filter(
+                    course__teacher=teacher,
+                    enrolled_time__date=day
+                ).count()
+                
+                # Course completions on this day
+                course_completions = models.CourseProgress.objects.filter(
+                    course__teacher=teacher,
+                    is_completed=True,
+                    completed_at__date=day
+                ).count()
+                
+                daily_lessons = lesson_completions + enrollment_count + course_completions
+                # Estimate time from lesson views (if any progress exists)
+                time_from_progress = models.CourseProgress.objects.filter(
+                    course__teacher=teacher,
+                    last_accessed__date=day
+                ).aggregate(total=Sum('total_time_spent_seconds'))['total'] or 0
+                daily_time = time_from_progress
+            
+            total_activities = teacher_act_count + daily_lessons
+            
             weekly_activity.append({
                 'date': day.strftime('%a'),
                 'full_date': day.strftime('%Y-%m-%d'),
-                'activities': teacher_activities + (student_activities['lessons'] or 0),
-                'time_minutes': round((student_activities['time'] or 0) / 60),
+                'activities': total_activities,
+                'time_minutes': round(daily_time / 60),
             })
         
-        # Top performing students (sorted by progress)
-        top_students = students.order_by('-progress_percentage')[:5]
-        top_students_data = [{
-            'id': s.id,
-            'student_name': s.student.fullname,
-            'student_profile_img': s.student.profile_img.url if s.student.profile_img else None,
-            'progress_percentage': s.progress_percentage,
-            'level': s.level,
-            'instrument': s.instrument,
-        } for s in top_students]
+        # Top performing students (sorted by real progress from CourseProgress)
+        top_students_data = []
+        for s in students:
+            real_prog = models.CourseProgress.objects.filter(
+                student=s.student, course__teacher=teacher
+            ).aggregate(avg=Avg('progress_percentage'))['avg'] or 0
+            top_students_data.append({
+                'id': s.id,
+                'student_name': s.student.fullname,
+                'student_profile_img': s.student.profile_img.url if s.student.profile_img else None,
+                'progress_percentage': round(real_prog),
+                'level': s.level,
+                'instrument': s.instrument,
+            })
+        top_students_data.sort(key=lambda x: x['progress_percentage'], reverse=True)
+        top_students_data = top_students_data[:5]
         
-        # Students needing attention
-        attention_students = students.filter(
-            Q(status='warning') | 
-            Q(status='inactive') |
-            Q(progress_percentage__lt=30)
-        ).order_by('progress_percentage')[:5]
-        
-        attention_data = [{
-            'id': s.id,
-            'student_name': s.student.fullname,
-            'student_profile_img': s.student.profile_img.url if s.student.profile_img else None,
-            'progress_percentage': s.progress_percentage,
-            'status': s.status,
-            'last_active': s.last_active.strftime('%Y-%m-%d'),
-            'instrument': s.instrument,
-        } for s in attention_students]
+        # Students needing attention (status warning/inactive OR low real progress)
+        attention_data = []
+        for s in students:
+            real_prog = models.CourseProgress.objects.filter(
+                student=s.student, course__teacher=teacher
+            ).aggregate(avg=Avg('progress_percentage'))['avg'] or 0
+            if s.status in ['warning', 'inactive'] or real_prog < 30:
+                attention_data.append({
+                    'id': s.id,
+                    'student_name': s.student.fullname,
+                    'student_profile_img': s.student.profile_img.url if s.student.profile_img else None,
+                    'progress_percentage': round(real_prog),
+                    'status': s.status,
+                    'last_active': s.last_active.strftime('%Y-%m-%d'),
+                    'instrument': s.instrument,
+                })
+        attention_data.sort(key=lambda x: x['progress_percentage'])
+        attention_data = attention_data[:5]
         
         # Course-level stats for the teacher
         teacher_courses = models.Course.objects.filter(teacher=teacher)

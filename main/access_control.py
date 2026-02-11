@@ -155,15 +155,42 @@ class SubscriptionAccessControl:
         
         # Check if enrolled in the course
         course = lesson.module.course
-        is_enrolled = models.StudentCourseEnrollment.objects.filter(
+        enrollment = models.StudentCourseEnrollment.objects.filter(
             student_id=student_id,
             course_id=course.id
-        ).exists()
+        ).first()
         
-        if not is_enrolled:
+        if not enrollment:
             return False, "You must enroll in this course to access this lesson.", subscription
         
-        # Check subscription lesson access
+        # If the enrollment was created by a teacher (via TeacherStudent relationship),
+        # bypass plan-level teacher/category restrictions since the teacher explicitly granted access.
+        # Only check subscription usage limits (daily/weekly/total).
+        teacher_assigned = models.TeacherStudent.objects.filter(
+            teacher=course.teacher,
+            student_id=student_id,
+            status='active'
+        ).exists()
+        
+        if teacher_assigned:
+            # Still check usage limits but skip teacher/category plan restrictions
+            if not subscription.plan or not subscription.is_active_and_paid():
+                return False, "No active subscription", subscription
+            
+            subscription.check_and_reset_limits()
+            
+            if subscription.lessons_accessed >= subscription.plan.max_lessons:
+                return False, f"Total lesson limit reached ({subscription.plan.max_lessons} lessons)", subscription
+            
+            if subscription.plan.lessons_per_day and subscription.lessons_used_today >= subscription.plan.lessons_per_day:
+                return False, f"Daily lesson limit reached ({subscription.plan.lessons_per_day} lessons/day)", subscription
+            
+            if subscription.plan.lessons_per_week and subscription.current_week_lessons >= subscription.plan.lessons_per_week:
+                return False, f"Weekly lesson limit reached ({subscription.plan.lessons_per_week} lessons/week)", subscription
+            
+            return True, "Access granted (teacher assigned).", subscription
+        
+        # Standard subscription-based lesson access check
         can_access, reason = subscription.can_access_lesson(lesson)
         if not can_access:
             return False, reason, subscription

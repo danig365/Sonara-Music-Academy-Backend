@@ -898,6 +898,7 @@ class TeacherStudent(models.Model):
     level = models.CharField(max_length=20, choices=LEVEL_CHOICES, default='beginner')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
     progress_percentage = models.IntegerField(default=0)
+    lessons_assigned_this_month = models.IntegerField(default=0)
     last_active = models.DateTimeField(auto_now=True)
     notes = models.TextField(null=True, blank=True)
     assigned_at = models.DateTimeField(auto_now_add=True)

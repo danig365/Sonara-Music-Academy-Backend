@@ -22,6 +22,20 @@ class TeacherSerializer(serializers.ModelSerializer):
             'profile_img': {'required': False},
         }
     
+    def to_internal_value(self, data):
+        """Convert empty strings to None for URL fields before validation"""
+        if 'face_url' in data and data['face_url'] == '':
+            data['face_url'] = None
+        if 'insta_url' in data and data['insta_url'] == '':
+            data['insta_url'] = None
+        if 'twit_url' in data and data['twit_url'] == '':
+            data['twit_url'] = None
+        if 'web_url' in data and data['web_url'] == '':
+            data['web_url'] = None
+        if 'you_url' in data and data['you_url'] == '':
+            data['you_url'] = None
+        return super().to_internal_value(data)
+    
     def get_teacher_courses(self, obj):
         from . import models
         return obj.teacher_courses.all().count()
@@ -35,27 +49,27 @@ class TeacherSerializer(serializers.ModelSerializer):
         return obj.total_teacher_course()
     
     def validate_face_url(self, value):
-        if value == '':
+        if value == '' or value is None:
             return None
         return value
     
     def validate_insta_url(self, value):
-        if value == '':
+        if value == '' or value is None:
             return None
         return value
     
     def validate_twit_url(self, value):
-        if value == '':
+        if value == '' or value is None:
             return None
         return value
     
     def validate_web_url(self, value):
-        if value == '':
+        if value == '' or value is None:
             return None
         return value
     
     def validate_you_url(self, value):
-        if value == '':
+        if value == '' or value is None:
             return None
         return value
     
@@ -674,6 +688,7 @@ class TeacherStudentSerializer(serializers.ModelSerializer):
     time_ago = serializers.SerializerMethodField()
     enrolled_courses = serializers.SerializerMethodField()
     enrolled_course_count = serializers.SerializerMethodField()
+    progress_percentage = serializers.SerializerMethodField()
     
     class Meta:
         model = models.TeacherStudent
@@ -682,20 +697,57 @@ class TeacherStudentSerializer(serializers.ModelSerializer):
                   'progress_percentage', 'last_active', 'time_ago', 'notes', 'assigned_at',
                   'enrolled_courses', 'enrolled_course_count']
     
+    def get_progress_percentage(self, obj):
+        """Calculate real average progress from the student's enrollments under this teacher"""
+        enrollments = models.StudentCourseEnrollment.objects.filter(
+            student=obj.student,
+            course__teacher=obj.teacher
+        )
+        if not enrollments.exists():
+            return 0
+        
+        total_progress = 0
+        count = 0
+        for enrollment in enrollments:
+            # First try to get progress from CourseProgress (most accurate)
+            course_progress = models.CourseProgress.objects.filter(
+                student=obj.student,
+                course=enrollment.course
+            ).first()
+            if course_progress:
+                total_progress += course_progress.progress_percentage
+            else:
+                # Fallback to enrollment's progress_percent
+                total_progress += enrollment.progress_percent
+            count += 1
+        
+        return round(total_progress / count) if count > 0 else 0
+    
     def get_enrolled_courses(self, obj):
         """Get courses this student is enrolled in under this teacher"""
         enrollments = models.StudentCourseEnrollment.objects.filter(
             student=obj.student,
             course__teacher=obj.teacher
         ).select_related('course')
-        return [{
-            'enrollment_id': e.id,
-            'course_id': e.course.id,
-            'course_title': e.course.title,
-            'progress_percent': e.progress_percent,
-            'enrolled_time': e.enrolled_time.strftime('%Y-%m-%d'),
-            'is_active': e.is_active,
-        } for e in enrollments]
+        
+        courses = []
+        for e in enrollments:
+            # Get real progress from CourseProgress
+            course_progress = models.CourseProgress.objects.filter(
+                student=obj.student,
+                course=e.course
+            ).first()
+            real_progress = course_progress.progress_percentage if course_progress else e.progress_percent
+            
+            courses.append({
+                'enrollment_id': e.id,
+                'course_id': e.course.id,
+                'course_title': e.course.title,
+                'progress_percent': real_progress,
+                'enrolled_time': e.enrolled_time.strftime('%Y-%m-%d'),
+                'is_active': e.is_active,
+            })
+        return courses
     
     def get_enrolled_course_count(self, obj):
         return models.StudentCourseEnrollment.objects.filter(
