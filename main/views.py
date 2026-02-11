@@ -4797,3 +4797,366 @@ def export_audit_logs(request, log_type):
             'bool': False,
             'message': str(e)
         }, status=500)
+
+
+# ==================== SCHOOL DASHBOARD VIEWS ====================
+
+from . serializers import (
+    SchoolUserSerializer, SchoolDashboardStatsSerializer,
+    GroupClassSerializer, GroupClassTeacherSerializer, GroupClassStudentSerializer,
+    LessonAssignmentSerializer
+)
+
+
+@csrf_exempt
+def school_login(request):
+    import hashlib
+    
+    email = request.POST.get('email')
+    password = request.POST.get('password')
+    
+    hashed_password = hashlib.sha256(password.encode()).hexdigest()
+    
+    try:
+        schoolUser = models.SchoolUser.objects.select_related('school').get(email=email, password=hashed_password)
+        schoolUser.last_login = datetime.now()
+        schoolUser.save()
+    except models.SchoolUser.DoesNotExist:
+        schoolUser = None
+    
+    if schoolUser:
+        return JsonResponse({
+            'bool': True,
+            'school_user_id': schoolUser.id,
+            'school_id': schoolUser.school.id,
+            'school_name': schoolUser.school.name,
+            'school_email': schoolUser.email,
+        })
+    else:
+        return JsonResponse({'bool': False})
+
+
+@csrf_exempt
+def school_change_password(request, school_user_id):
+    import hashlib
+    password = request.POST.get('password')
+    try:
+        schoolUser = models.SchoolUser.objects.get(id=school_user_id)
+        schoolUser.password = hashlib.sha256(password.encode()).hexdigest()
+        schoolUser.save()
+        return JsonResponse({'bool': True})
+    except models.SchoolUser.DoesNotExist:
+        return JsonResponse({'bool': False})
+
+
+def school_dashboard_stats(request, school_id):
+    """Get comprehensive school dashboard statistics"""
+    try:
+        school = models.School.objects.get(id=school_id)
+    except models.School.DoesNotExist:
+        return JsonResponse({'bool': False, 'message': 'School not found'}, status=404)
+    
+    total_teachers = models.SchoolTeacher.objects.filter(school=school).count()
+    total_students = models.SchoolStudent.objects.filter(school=school).count()
+    total_courses = models.SchoolCourse.objects.filter(school=school).count()
+    total_groups = models.GroupClass.objects.filter(school=school).count()
+    total_lesson_assignments = models.LessonAssignment.objects.filter(school=school).count()
+    
+    # Recent lesson assignments
+    recent_assignments = models.LessonAssignment.objects.filter(
+        school=school
+    ).select_related('lesson', 'student', 'group_class').order_by('-assigned_at')[:5]
+    
+    recent_assignment_data = [{
+        'id': a.id,
+        'lesson_title': a.lesson.title if a.lesson else 'Unknown',
+        'target': a.student.fullname if a.student else (a.group_class.name if a.group_class else 'Unknown'),
+        'assignment_type': a.assignment_type,
+        'assigned_at': a.assigned_at.strftime('%Y-%m-%d %H:%M'),
+    } for a in recent_assignments]
+    
+    # Group classes overview
+    group_classes = models.GroupClass.objects.filter(school=school).order_by('-created_at')[:5]
+    group_data = [{
+        'id': g.id,
+        'name': g.name,
+        'teachers': g.total_teachers(),
+        'students': g.total_students(),
+        'is_active': g.is_active,
+    } for g in group_classes]
+    
+    # Teachers in school
+    school_teachers = models.SchoolTeacher.objects.filter(
+        school=school
+    ).select_related('teacher')[:5]
+    teacher_data = [{
+        'id': st.teacher.id,
+        'name': st.teacher.full_name,
+        'email': st.teacher.email,
+        'courses': st.teacher.total_teacher_course(),
+        'students': st.teacher.total_teacher_students(),
+    } for st in school_teachers]
+    
+    # Students in school  
+    school_students = models.SchoolStudent.objects.filter(
+        school=school
+    ).select_related('student')[:5]
+    student_data = [{
+        'id': ss.student.id,
+        'name': ss.student.fullname,
+        'email': ss.student.email,
+        'enrolled_courses': ss.student.enrolled_courses(),
+    } for ss in school_students]
+    
+    return JsonResponse({
+        'school_name': school.name,
+        'school_status': school.status,
+        'total_teachers': total_teachers,
+        'total_students': total_students,
+        'total_courses': total_courses,
+        'total_groups': total_groups,
+        'total_lesson_assignments': total_lesson_assignments,
+        'recent_assignments': recent_assignment_data,
+        'group_classes': group_data,
+        'teachers': teacher_data,
+        'students': student_data,
+    })
+
+
+class SchoolTeacherListView(generics.ListAPIView):
+    """List teachers belonging to a school"""
+    serializer_class = SchoolTeacherSerializer
+    
+    def get_queryset(self):
+        school_id = self.kwargs['school_id']
+        return models.SchoolTeacher.objects.filter(school_id=school_id)
+
+
+class SchoolStudentListView(generics.ListAPIView):
+    """List students belonging to a school"""
+    serializer_class = SchoolStudentSerializer
+    
+    def get_queryset(self):
+        school_id = self.kwargs['school_id']
+        return models.SchoolStudent.objects.filter(school_id=school_id)
+
+
+class SchoolCourseListView(generics.ListAPIView):
+    """List courses belonging to a school"""
+    serializer_class = SchoolCourseSerializer
+    
+    def get_queryset(self):
+        school_id = self.kwargs['school_id']
+        return models.SchoolCourse.objects.filter(school_id=school_id)
+
+
+@csrf_exempt
+def school_assign_teacher_to_student(request, school_id):
+    """Assign a teacher to a student within the school"""
+    if request.method == 'POST':
+        teacher_id = request.POST.get('teacher_id')
+        student_id = request.POST.get('student_id')
+        instrument = request.POST.get('instrument', 'piano')
+        level = request.POST.get('level', 'beginner')
+        
+        try:
+            teacher = models.Teacher.objects.get(id=teacher_id)
+            student = models.Student.objects.get(id=student_id)
+            
+            obj, created = models.TeacherStudent.objects.get_or_create(
+                teacher=teacher,
+                student=student,
+                defaults={'instrument': instrument, 'level': level}
+            )
+            
+            return JsonResponse({
+                'bool': True,
+                'created': created,
+                'message': 'Teacher assigned to student successfully' if created else 'Assignment already exists'
+            })
+        except Exception as e:
+            return JsonResponse({'bool': False, 'message': str(e)})
+    
+    return JsonResponse({'bool': False, 'message': 'POST required'})
+
+
+# Group Class CRUD
+class SchoolGroupClassList(generics.ListCreateAPIView):
+    serializer_class = GroupClassSerializer
+    
+    def get_queryset(self):
+        school_id = self.kwargs['school_id']
+        return models.GroupClass.objects.filter(school_id=school_id)
+
+
+class SchoolGroupClassDetail(generics.RetrieveUpdateDestroyAPIView):
+    queryset = models.GroupClass.objects.all()
+    serializer_class = GroupClassSerializer
+
+
+@csrf_exempt
+def school_assign_teacher_to_group(request, group_id):
+    """Assign a teacher to a group class"""
+    if request.method == 'POST':
+        teacher_id = request.POST.get('teacher_id')
+        try:
+            obj, created = models.GroupClassTeacher.objects.get_or_create(
+                group_class_id=group_id,
+                teacher_id=teacher_id
+            )
+            return JsonResponse({
+                'bool': True, 'created': created,
+                'message': 'Teacher assigned to group' if created else 'Already assigned'
+            })
+        except Exception as e:
+            return JsonResponse({'bool': False, 'message': str(e)})
+    return JsonResponse({'bool': False, 'message': 'POST required'})
+
+
+@csrf_exempt
+def school_remove_teacher_from_group(request, group_id, teacher_id):
+    """Remove a teacher from a group class"""
+    try:
+        models.GroupClassTeacher.objects.filter(
+            group_class_id=group_id, teacher_id=teacher_id
+        ).delete()
+        return JsonResponse({'bool': True})
+    except Exception as e:
+        return JsonResponse({'bool': False, 'message': str(e)})
+
+
+@csrf_exempt
+def school_assign_student_to_group(request, group_id):
+    """Assign a student to a group class"""
+    if request.method == 'POST':
+        student_id = request.POST.get('student_id')
+        try:
+            obj, created = models.GroupClassStudent.objects.get_or_create(
+                group_class_id=group_id,
+                student_id=student_id
+            )
+            return JsonResponse({
+                'bool': True, 'created': created,
+                'message': 'Student assigned to group' if created else 'Already assigned'
+            })
+        except Exception as e:
+            return JsonResponse({'bool': False, 'message': str(e)})
+    return JsonResponse({'bool': False, 'message': 'POST required'})
+
+
+@csrf_exempt
+def school_remove_student_from_group(request, group_id, student_id):
+    """Remove a student from a group class"""
+    try:
+        models.GroupClassStudent.objects.filter(
+            group_class_id=group_id, student_id=student_id
+        ).delete()
+        return JsonResponse({'bool': True})
+    except Exception as e:
+        return JsonResponse({'bool': False, 'message': str(e)})
+
+
+class GroupClassTeacherList(generics.ListAPIView):
+    serializer_class = GroupClassTeacherSerializer
+    
+    def get_queryset(self):
+        group_id = self.kwargs['group_id']
+        return models.GroupClassTeacher.objects.filter(group_class_id=group_id)
+
+
+class GroupClassStudentList(generics.ListAPIView):
+    serializer_class = GroupClassStudentSerializer
+    
+    def get_queryset(self):
+        group_id = self.kwargs['group_id']
+        return models.GroupClassStudent.objects.filter(group_class_id=group_id)
+
+
+# Lesson Assignments
+class SchoolLessonAssignmentList(generics.ListCreateAPIView):
+    serializer_class = LessonAssignmentSerializer
+    
+    def get_queryset(self):
+        school_id = self.kwargs['school_id']
+        return models.LessonAssignment.objects.filter(school_id=school_id)
+
+
+class SchoolLessonAssignmentDetail(generics.RetrieveUpdateDestroyAPIView):
+    queryset = models.LessonAssignment.objects.all()
+    serializer_class = LessonAssignmentSerializer
+
+
+# School Progress Overview
+def school_progress_overview(request, school_id):
+    """High-level view of progress and participation for school"""
+    try:
+        school = models.School.objects.get(id=school_id)
+    except models.School.DoesNotExist:
+        return JsonResponse({'bool': False, 'message': 'School not found'}, status=404)
+    
+    # Get all student IDs in this school
+    student_ids = models.SchoolStudent.objects.filter(
+        school=school
+    ).values_list('student_id', flat=True)
+    
+    # Overall enrollment stats
+    total_enrollments = models.StudentCourseEnrollment.objects.filter(
+        student_id__in=student_ids
+    ).count()
+    
+    # Progress by student
+    student_progress = []
+    school_students = models.SchoolStudent.objects.filter(
+        school=school
+    ).select_related('student')[:20]
+    
+    for ss in school_students:
+        enrollments = models.StudentCourseEnrollment.objects.filter(student=ss.student)
+        total_courses = enrollments.count()
+        avg_progress = enrollments.aggregate(avg=Avg('progress_percent'))['avg'] or 0
+        
+        student_progress.append({
+            'id': ss.student.id,
+            'name': ss.student.fullname,
+            'email': ss.student.email,
+            'total_courses': total_courses,
+            'avg_progress': round(avg_progress, 1),
+        })
+    
+    # Progress by group class
+    group_progress = []
+    groups = models.GroupClass.objects.filter(school=school)
+    for group in groups:
+        group_student_ids = group.group_students.values_list('student_id', flat=True)
+        group_enrollments = models.StudentCourseEnrollment.objects.filter(
+            student_id__in=group_student_ids
+        )
+        avg_progress = group_enrollments.aggregate(avg=Avg('progress_percent'))['avg'] or 0
+        
+        group_progress.append({
+            'id': group.id,
+            'name': group.name,
+            'total_students': group.total_students(),
+            'total_teachers': group.total_teachers(),
+            'avg_progress': round(avg_progress, 1),
+        })
+    
+    # Recent activity (lesson completions)
+    recent_completions = models.ModuleLessonProgress.objects.filter(
+        student_id__in=student_ids,
+        is_completed=True
+    ).select_related('student', 'lesson').order_by('-completed_at')[:10]
+    
+    completion_data = [{
+        'student_name': c.student.fullname,
+        'lesson_title': c.lesson.title,
+        'completed_at': c.completed_at.strftime('%Y-%m-%d %H:%M') if c.completed_at else None,
+    } for c in recent_completions]
+    
+    return JsonResponse({
+        'total_enrollments': total_enrollments,
+        'total_students': len(student_ids),
+        'student_progress': student_progress,
+        'group_progress': group_progress,
+        'recent_completions': completion_data,
+    })

@@ -307,4 +307,34 @@ urlpatterns =[
         path('audit/summary/', views.get_audit_summary),
         path('audit/export/<str:log_type>/', views.export_audit_logs),
 
+        # ==================== SCHOOL DASHBOARD URLS ====================
+        
+        # School Authentication
+        path('school-login', views.school_login),
+        path('school/change-password/<int:school_user_id>/', views.school_change_password),
+        path('school/dashboard/<int:school_id>/', views.school_dashboard_stats),
+        
+        # School Teachers / Students / Courses
+        path('school/teachers/<int:school_id>/', views.SchoolTeacherListView.as_view()),
+        path('school/students/<int:school_id>/', views.SchoolStudentListView.as_view()),
+        path('school/courses/<int:school_id>/', views.SchoolCourseListView.as_view()),
+        path('school/assign-teacher-to-student/<int:school_id>/', views.school_assign_teacher_to_student),
+        
+        # Group Classes
+        path('school/groups/<int:school_id>/', views.SchoolGroupClassList.as_view()),
+        path('school/group/<int:pk>/', views.SchoolGroupClassDetail.as_view()),
+        path('school/group/<int:group_id>/assign-teacher/', views.school_assign_teacher_to_group),
+        path('school/group/<int:group_id>/remove-teacher/<int:teacher_id>/', views.school_remove_teacher_from_group),
+        path('school/group/<int:group_id>/assign-student/', views.school_assign_student_to_group),
+        path('school/group/<int:group_id>/remove-student/<int:student_id>/', views.school_remove_student_from_group),
+        path('school/group/<int:group_id>/teachers/', views.GroupClassTeacherList.as_view()),
+        path('school/group/<int:group_id>/students/', views.GroupClassStudentList.as_view()),
+        
+        # Lesson Assignments
+        path('school/lesson-assignments/<int:school_id>/', views.SchoolLessonAssignmentList.as_view()),
+        path('school/lesson-assignment/<int:pk>/', views.SchoolLessonAssignmentDetail.as_view()),
+        
+        # School Progress
+        path('school/progress/<int:school_id>/', views.school_progress_overview),
+
 ]

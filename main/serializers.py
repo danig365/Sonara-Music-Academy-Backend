@@ -23,17 +23,15 @@ class TeacherSerializer(serializers.ModelSerializer):
         }
     
     def to_internal_value(self, data):
-        """Convert empty strings to None for URL fields before validation"""
-        if 'face_url' in data and data['face_url'] == '':
-            data['face_url'] = None
-        if 'insta_url' in data and data['insta_url'] == '':
-            data['insta_url'] = None
-        if 'twit_url' in data and data['twit_url'] == '':
-            data['twit_url'] = None
-        if 'web_url' in data and data['web_url'] == '':
-            data['web_url'] = None
-        if 'you_url' in data and data['you_url'] == '':
-            data['you_url'] = None
+        """Convert empty strings and 'null' to None for URL fields before validation"""
+        # QueryDict from multipart form data is immutable, so make a mutable copy
+        from django.http import QueryDict
+        if isinstance(data, QueryDict):
+            data = data.copy()  # returns a mutable copy
+        url_fields = ['face_url', 'insta_url', 'twit_url', 'web_url', 'you_url']
+        for field in url_fields:
+            if field in data and data[field] in ('', 'null', 'None', None):
+                data[field] = ''
         return super().to_internal_value(data)
     
     def get_teacher_courses(self, obj):
@@ -1089,3 +1087,94 @@ class AccessLogSerializer(serializers.ModelSerializer):
     
     def get_user_display(self, obj):
         return obj.get_user_display()
+
+
+# ==================== SCHOOL DASHBOARD SERIALIZERS ====================
+
+class SchoolUserSerializer(serializers.ModelSerializer):
+    school_name = serializers.CharField(source='school.name', read_only=True)
+    
+    class Meta:
+        model = models.SchoolUser
+        fields = ['id', 'school', 'school_name', 'email', 'password', 'is_active', 
+                  'last_login', 'created_at']
+        extra_kwargs = {
+            'password': {'write_only': True},
+        }
+
+
+class SchoolDashboardStatsSerializer(serializers.Serializer):
+    """Serializer for school dashboard statistics"""
+    total_teachers = serializers.IntegerField()
+    total_students = serializers.IntegerField()
+    total_courses = serializers.IntegerField()
+    total_groups = serializers.IntegerField()
+    total_lesson_assignments = serializers.IntegerField()
+    school_name = serializers.CharField()
+    school_status = serializers.CharField()
+
+
+class GroupClassSerializer(serializers.ModelSerializer):
+    total_teachers = serializers.IntegerField(read_only=True)
+    total_students = serializers.IntegerField(read_only=True)
+    
+    class Meta:
+        model = models.GroupClass
+        fields = ['id', 'school', 'name', 'description', 'schedule', 'max_students',
+                  'is_active', 'total_teachers', 'total_students', 'created_at', 'updated_at']
+
+    def __init__(self, *args, **kwargs):
+        super(GroupClassSerializer, self).__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request and request.method in ['POST', 'PUT', 'PATCH']:
+            self.Meta.depth = 0
+        else:
+            self.Meta.depth = 1
+
+
+class GroupClassTeacherSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.GroupClassTeacher
+        fields = ['id', 'group_class', 'teacher', 'assigned_at']
+
+    def __init__(self, *args, **kwargs):
+        super(GroupClassTeacherSerializer, self).__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request and request.method in ['POST', 'PUT', 'PATCH']:
+            self.Meta.depth = 0
+        else:
+            self.Meta.depth = 2
+
+
+class GroupClassStudentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = models.GroupClassStudent
+        fields = ['id', 'group_class', 'student', 'assigned_at']
+
+    def __init__(self, *args, **kwargs):
+        super(GroupClassStudentSerializer, self).__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request and request.method in ['POST', 'PUT', 'PATCH']:
+            self.Meta.depth = 0
+        else:
+            self.Meta.depth = 2
+
+
+class LessonAssignmentSerializer(serializers.ModelSerializer):
+    lesson_title = serializers.CharField(source='lesson.title', read_only=True)
+    student_name = serializers.CharField(source='student.fullname', read_only=True, allow_null=True)
+    group_name = serializers.CharField(source='group_class.name', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = models.LessonAssignment
+        fields = ['id', 'school', 'lesson', 'lesson_title', 'assignment_type',
+                  'student', 'student_name', 'group_class', 'group_name',
+                  'due_date', 'notes', 'assigned_at']
+
+    def __init__(self, *args, **kwargs):
+        super(LessonAssignmentSerializer, self).__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request and request.method in ['POST', 'PUT', 'PATCH']:
+            self.Meta.depth = 0
+        else:
+            self.Meta.depth = 1

@@ -10,11 +10,11 @@ class Teacher(models.Model):
     profile_img=models.ImageField(upload_to='teacher_profile_imgs/',null=True)
     skills=models.CharField(max_length=20,null=True)
 
-    face_url=models.URLField(null=True)
-    insta_url=models.URLField(null=True)
-    twit_url=models.URLField(null=True)
-    web_url=models.URLField(null=True)
-    you_url=models.URLField(null=True)
+    face_url=models.URLField(null=True,blank=True)
+    insta_url=models.URLField(null=True,blank=True)
+    twit_url=models.URLField(null=True,blank=True)
+    web_url=models.URLField(null=True,blank=True)
+    you_url=models.URLField(null=True,blank=True)
 
     class Meta:
         verbose_name_plural="1. Teacher"
@@ -1781,6 +1781,102 @@ class PaymentLog(models.Model):
     
     def __str__(self):
         return f"{self.student.fullname} - {self.payment_type} - {self.amount} {self.currency} - {self.status}"
+
+
+# ==================== SCHOOL DASHBOARD MODELS ====================
+
+class SchoolUser(models.Model):
+    """Login user for a School - separate from School entity"""
+    school = models.OneToOneField(School, on_delete=models.CASCADE, related_name='school_user')
+    email = models.CharField(max_length=100, unique=True)
+    password = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
+    last_login = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = "56. School Users"
+
+    def __str__(self):
+        return f"{self.school.name} - {self.email}"
+
+
+class GroupClass(models.Model):
+    """Group classes that a school can create"""
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='group_classes')
+    name = models.CharField(max_length=200)
+    description = models.TextField(null=True, blank=True)
+    schedule = models.CharField(max_length=200, null=True, blank=True, help_text="e.g. Mon/Wed 4:00 PM")
+    max_students = models.IntegerField(default=20)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "57. Group Classes"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.school.name} - {self.name}"
+
+    def total_teachers(self):
+        return self.group_teachers.count()
+
+    def total_students(self):
+        return self.group_students.count()
+
+
+class GroupClassTeacher(models.Model):
+    """Teachers assigned to a group class"""
+    group_class = models.ForeignKey(GroupClass, on_delete=models.CASCADE, related_name='group_teachers')
+    teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE, related_name='group_teaching')
+    assigned_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = "58. Group Class Teachers"
+        unique_together = ['group_class', 'teacher']
+
+    def __str__(self):
+        return f"{self.group_class.name} - {self.teacher.full_name}"
+
+
+class GroupClassStudent(models.Model):
+    """Students assigned to a group class"""
+    group_class = models.ForeignKey(GroupClass, on_delete=models.CASCADE, related_name='group_students')
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='group_memberships')
+    assigned_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = "59. Group Class Students"
+        unique_together = ['group_class', 'student']
+
+    def __str__(self):
+        return f"{self.group_class.name} - {self.student.fullname}"
+
+
+class LessonAssignment(models.Model):
+    """Lessons assigned by school to individual students or group classes"""
+    ASSIGNMENT_TYPE_CHOICES = [
+        ('individual', 'Individual Student'),
+        ('group', 'Group Class'),
+    ]
+    
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='lesson_assignments')
+    lesson = models.ForeignKey(ModuleLesson, on_delete=models.CASCADE, related_name='school_assignments')
+    assignment_type = models.CharField(max_length=20, choices=ASSIGNMENT_TYPE_CHOICES, default='individual')
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, null=True, blank=True, related_name='school_lesson_assignments')
+    group_class = models.ForeignKey(GroupClass, on_delete=models.CASCADE, null=True, blank=True, related_name='lesson_assignments')
+    due_date = models.DateField(null=True, blank=True)
+    notes = models.TextField(null=True, blank=True)
+    assigned_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = "60. Lesson Assignments"
+        ordering = ['-assigned_at']
+
+    def __str__(self):
+        target = self.student.fullname if self.student else self.group_class.name if self.group_class else 'Unknown'
+        return f"{self.school.name} - {self.lesson.title} -> {target}"
 
 
 class AccessLog(models.Model):
