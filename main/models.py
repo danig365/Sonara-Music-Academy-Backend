@@ -1407,6 +1407,11 @@ class Subscription(models.Model):
             # If assigned teacher is set, only allow their courses
             if self.assigned_teacher and course.teacher_id != self.assigned_teacher_id:
                 return False, f"You can only access courses from your assigned teacher: {self.assigned_teacher.full_name}"
+            
+            # Check course's required access level against plan's access level
+            if hasattr(course, 'required_access_level') and course.required_access_level:
+                if not course.can_be_accessed_by_level(self.plan.access_level):
+                    return False, f"This course requires '{course.required_access_level}' access level, but your plan provides '{self.plan.access_level}'"
         
         return True, "Access granted"
 
@@ -1433,6 +1438,17 @@ class Subscription(models.Model):
                 return False, f"Weekly lesson limit reached ({self.plan.lessons_per_week} lessons/week)"
         
         if lesson:
+            # Check lesson's required access level against plan's access level
+            if hasattr(lesson, 'required_access_level') and lesson.required_access_level:
+                if not lesson.can_be_accessed_by_level(self.plan.access_level):
+                    return False, f"This lesson requires '{lesson.required_access_level}' access level, but your plan provides '{self.plan.access_level}'"
+            
+            # Check is_premium flag - only premium/unlimited plans can access premium lessons
+            if hasattr(lesson, 'is_premium') and lesson.is_premium:
+                plan_rank = self.plan.get_access_level_rank()
+                if plan_rank < 3:  # Less than 'premium' rank
+                    return False, "This is a premium lesson. Please upgrade your subscription to access premium content."
+            
             # Check if lesson's course belongs to allowed teacher/category
             if hasattr(lesson, 'module') and lesson.module and hasattr(lesson.module, 'course'):
                 course = lesson.module.course

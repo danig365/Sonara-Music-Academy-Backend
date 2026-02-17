@@ -166,7 +166,7 @@ class ModuleLessonSerializer(serializers.ModelSerializer):
     file_size_formatted = serializers.ReadOnlyField()
     objectives_list = serializers.ReadOnlyField()
     downloadables = LessonDownloadableSerializer(many=True, read_only=True)
-    required_access_level = serializers.CharField(read_only=True)
+    required_access_level = serializers.CharField(required=False, default='free')
     
     class Meta:
         model = models.ModuleLesson

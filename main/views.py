@@ -150,6 +150,28 @@ class StudentEnrollCourseList(generics.ListCreateAPIView):
     queryset=models.StudentCourseEnrollment.objects.all()
     serializer_class=StudentCourseEnrollSerializer
 
+    def create(self, request, *args, **kwargs):
+        """Override create to enforce subscription validation on enrollment"""
+        from .access_control import SubscriptionAccessControl
+        student_id = request.data.get('student')
+        course_id = request.data.get('course')
+        
+        if student_id and course_id:
+            can_enroll, msg = SubscriptionAccessControl.can_enroll_in_course(student_id, course_id)
+            if not can_enroll:
+                return Response(
+                    {'error': msg, 'detail': msg},
+                    status=403
+                )
+            # If enrollment is allowed, create and also record it in subscription
+            response = super().create(request, *args, **kwargs)
+            if response.status_code == 201:
+                subscription = SubscriptionAccessControl.get_active_subscription(student_id)
+                if subscription:
+                    subscription.record_course_enrollment()
+            return response
+        return super().create(request, *args, **kwargs)
+
 def fetch_enroll_status(request,student_id,course_id):
     student=models.Student.objects.filter(id=student_id).first()
     course=models.Course.objects.filter(id=course_id).first()
@@ -2996,6 +3018,16 @@ class LessonDetailWithDownloadables(APIView):
         try:
             lesson = models.ModuleLesson.objects.get(pk=lesson_id)
             
+            # Check active subscription before serving lesson details
+            if student_id:
+                from .access_control import SubscriptionAccessControl
+                has_sub, subscription, sub_msg = SubscriptionAccessControl.check_subscription_status(student_id)
+                if not has_sub and not lesson.is_preview:
+                    return Response({
+                        'error': sub_msg,
+                        'subscription_required': True
+                    }, status=403)
+            
             # Get student progress if student_id provided
             is_completed = False
             last_position = 0
@@ -3156,6 +3188,15 @@ class StudentLessonPageData(APIView):
         try:
             student = models.Student.objects.get(pk=student_id)
             course = models.Course.objects.get(pk=course_id)
+            
+            # Check active subscription before serving lesson content
+            from .access_control import SubscriptionAccessControl
+            has_sub, subscription, sub_msg = SubscriptionAccessControl.check_subscription_status(student_id)
+            if not has_sub:
+                return Response({
+                    'error': sub_msg,
+                    'subscription_required': True
+                }, status=403)
             
             # Check enrollment
             enrollment = models.StudentCourseEnrollment.objects.filter(
